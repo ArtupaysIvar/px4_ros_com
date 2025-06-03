@@ -19,3 +19,10 @@ Use the [Issues](https://github.com/PX4/px4_ros_com/issues) section to create a 
 ## Questions and troubleshooting
 
 Reach the PX4 development team on the [PX4 Discord Server](https://discord.gg/dronecode).
+
+
+note:
+git clone https://github.com/gazebosim/ros_gz.git
+cd ros_gz
+git checkout humble  
+colcon build
