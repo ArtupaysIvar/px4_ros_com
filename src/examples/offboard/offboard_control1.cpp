@@ -41,12 +41,12 @@
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
-#include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <stdint.h>
+
 #include <chrono>
 #include <iostream>
-#include <cmath>
 
 using namespace std::chrono;
 using namespace std::chrono_literals;
@@ -62,76 +62,31 @@ public:
         vehicle_command_publisher_ = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
 
         offboard_setpoint_counter_ = 0;
-        land_command_sent_ = false;
-        current_z_ = 0.0; // Start on the ground
-        current_yaw_ = 0.0; // Will be updated from odometry
-
-        // Subscribe to vehicle odometry to get current yaw
-        odom_sub_ = this->create_subscription<VehicleOdometry>(
-            "/fmu/out/vehicle_odometry",
-            rclcpp::QoS(10).best_effort(),
-            [this](const VehicleOdometry::SharedPtr msg) {
-                float q0 = msg->q[0];
-                float q1 = msg->q[1];
-                float q2 = msg->q[2];
-                float q3 = msg->q[3];
-                current_yaw_ = std::atan2(2.0f * (q0 * q3 + q1 * q2),
-                                          1.0f - 2.0f * (q2 * q2 + q3 * q3));
-            }
-        );
+        land_command_sent_ = false; // Add this line
 
         auto timer_callback = [this]() -> void {
-            // After 10 setpoints, switch to offboard mode and arm
+
             if (offboard_setpoint_counter_ == 10) {
+                // Change to Offboard mode after 10 setpoints
                 this->publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
+
+                // Arm the vehicle
                 this->arm();
             }
 
-            // 1. Takeoff: ascend to z = -3.0 (NED frame, so -3.0 means 3m above ground)
-            // Hold at (0,0,-3.0) for 5 seconds (50 cycles)
-            float x = 0.0, y = 0.0;
-            if (offboard_setpoint_counter_ > 20 && offboard_setpoint_counter_ <= 70) {
-                // Hold at (0,0,-3.0)
-                x = 0.0; y = 0.0;
-            } else if (offboard_setpoint_counter_ > 70 && offboard_setpoint_counter_ <= 120) {
-                // Move to (3,0,-3.0) and hold for 5s
-                x = 3.0; y = 0.0;
-            } else if (offboard_setpoint_counter_ > 120 && offboard_setpoint_counter_ <= 170) {
-                // Move to (3,3,-3.0) and hold for 5s
-                x = 3.0; y = 3.0;
-            } else if (offboard_setpoint_counter_ > 170 && offboard_setpoint_counter_ <= 220) {
-                // Move to (0,3,-3.0) and hold for 5s
-                x = 0.0; y = 3.0;
-            } else if (offboard_setpoint_counter_ > 220 && offboard_setpoint_counter_ <= 270) {
-                // Return to (0,0,-3.0) and hold for 5s
-                x = 0.0; y = 0.0;
-            }
-
-            // Set altitude and yaw (keep yaw constant)
-            current_z_ = -3.0;
-
-            // Store the current mission setpoint for publishing
-            current_x_ = x;
-            current_y_ = y;
-
+            // offboard_control_mode needs to be paired with trajectory_setpoint
             publish_offboard_control_mode();
             publish_trajectory_setpoint();
 
-            // Land after completing the square and holding at the last point
-            if (offboard_setpoint_counter_ == 280 && !land_command_sent_) {
+            // After 10 seconds (100 * 100ms), send land command once
+            if (offboard_setpoint_counter_ == 200 && !land_command_sent_) {
                 this->publish_vehicle_command(VehicleCommand::VEHICLE_CMD_NAV_LAND, 0.0, 0.0);
                 RCLCPP_INFO(this->get_logger(), "Land command sent");
                 land_command_sent_ = true;
             }
 
-            // Disarm 2 seconds after land command
-            if (offboard_setpoint_counter_ == 300 && land_command_sent_) {
-                this->disarm();
-                RCLCPP_INFO(this->get_logger(), "Disarm command sent after landing (timed)");
-                land_command_sent_ = false;
-            }
-
-            if (offboard_setpoint_counter_ < 320) {
+            // stop the counter after reaching 101
+            if (offboard_setpoint_counter_ < 201) {
                 offboard_setpoint_counter_++;
             }
         };
@@ -147,16 +102,11 @@ private:
     rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_publisher_;
     rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
     rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher_;
-    rclcpp::Subscription<VehicleOdometry>::SharedPtr odom_sub_;
 
-    std::atomic<uint64_t> timestamp_;
+    std::atomic<uint64_t> timestamp_;   //!< common synced timestamped
 
-    uint64_t offboard_setpoint_counter_;
-    bool land_command_sent_;
-    float current_z_; // Track current altitude setpoint
-    float current_yaw_; // Track current yaw from odometry
-    float current_x_ = 0.0;
-    float current_y_ = 0.0;
+    uint64_t offboard_setpoint_counter_;   //!< counter for the number of setpoints sent
+    bool land_command_sent_;               //!< flag to ensure land command is sent only once
 
     void publish_offboard_control_mode();
     void publish_trajectory_setpoint();
@@ -169,6 +119,7 @@ private:
 void OffboardControl::arm()
 {
     publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0);
+
     RCLCPP_INFO(this->get_logger(), "Arm command send");
 }
 
@@ -178,6 +129,7 @@ void OffboardControl::arm()
 void OffboardControl::disarm()
 {
     publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0);
+
     RCLCPP_INFO(this->get_logger(), "Disarm command send");
 }
 
@@ -188,24 +140,35 @@ void OffboardControl::disarm()
 void OffboardControl::publish_offboard_control_mode()
 {
     OffboardControlMode msg{};
-    msg.position = true;      // Enable position control
-    msg.velocity = false;     // Disable velocity control
-    msg.acceleration = false; // Disable acceleration control
+    msg.position = true;
+    msg.velocity = false;
+    msg.acceleration = false;
     msg.attitude = false;
     msg.body_rate = false;
     msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     offboard_control_mode_publisher_->publish(msg);
 }
 
+/**
+ * @brief Publish a trajectory setpoint
+ *        For this example, it sends a trajectory setpoint to make the
+ *        vehicle hover at 5 meters with a yaw angle of 180 degrees.
+ */
 void OffboardControl::publish_trajectory_setpoint()
 {
     TrajectorySetpoint msg{};
-    msg.position = {current_x_, current_y_, current_z_}; // Use current_x_, current_y_, current_z_
-    msg.yaw = current_yaw_; // Keep yaw fixed
+    msg.position = {0.0, 0.0, -3.0}; // [x, y, z] in meters, z is negative for altitude
+    msg.yaw = -3.14; // [-PI:PI]
     msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     trajectory_setpoint_publisher_->publish(msg);
 }
 
+/**
+ * @brief Publish vehicle commands
+ * @param command   Command code (matches VehicleCommand and MAVLink MAV_CMD codes)
+ * @param param1    Command parameter 1
+ * @param param2    Command parameter 2
+ */
 void OffboardControl::publish_vehicle_command(uint16_t command, float param1, float param2)
 {
     VehicleCommand msg{};
@@ -227,6 +190,7 @@ int main(int argc, char *argv[])
     setvbuf(stdout, NULL, _IONBF, BUFSIZ);
     rclcpp::init(argc, argv);
     rclcpp::spin(std::make_shared<OffboardControl>());
+
     rclcpp::shutdown();
     return 0;
 }

@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleLocalPosition, VehicleStatus
-import math
+import csv
 
 
 class OffboardControl(Node):
@@ -39,18 +39,25 @@ class OffboardControl(Node):
         self.offboard_setpoint_counter = 0
         self.vehicle_local_position = VehicleLocalPosition()
         self.vehicle_status = VehicleStatus()
-        self.takeoff_height = -3.0
-
-        self.radius = 2.0  # Circle radius in meters
-        self.altitude = -3.0  # PX4 NED frame: negative is up
-        self.center_x = 0.0
-        self.center_y = 0.0
-        self.circle_duration = 20.0  # seconds to complete a circle
-        self.start_time = self.get_clock().now().nanoseconds / 1e9
-        self.reached_altitude = False  # Track if 5m altitude is reached
+        self.waypoints = self.load_waypoints('/home/artupays/drone_code_ws/src/px4_ros_com/src/examples/offboard_py/path.csv')
+        self.current_waypoint_index = 0
+        self.start = 0
 
         # Create a timer to publish control commands
         self.timer = self.create_timer(0.1, self.timer_callback)
+
+    def load_waypoints(self, file_path: str):
+        """Load waypoints from a CSV file."""
+        waypoints = []
+        try:
+            with open(file_path, 'r') as file:
+                reader = csv.DictReader(file)
+                for row in reader:
+                    waypoints.append((float(row['x']), float(row['y']), float(row['z'])))
+            self.get_logger().info(f"Loaded {len(waypoints)} waypoints from {file_path}")
+        except Exception as e:
+            self.get_logger().error(f"Error loading waypoints: {e}")
+        return waypoints
 
     def vehicle_local_position_callback(self, vehicle_local_position):
         """Callback function for vehicle_local_position topic subscriber."""
@@ -129,34 +136,19 @@ class OffboardControl(Node):
         if self.offboard_setpoint_counter == 10:
             self.engage_offboard_mode()
             self.arm()
+            self.start = 1
 
-        # Wait until armed and in offboard mode
-        if self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD and self.vehicle_status.arming_state == VehicleStatus.ARMING_STATE_ARMED:
-            # Check if drone has reached 5m altitude (NED: z ~ -5.0)
-            current_z = self.vehicle_local_position.z
-            if not self.reached_altitude:
-                # Allow a tolerance of 0.2m
-                if current_z is not None and abs(current_z - self.altitude) < 0.2:
-                    self.reached_altitude = True
-                    self.start_time = self.get_clock().now().nanoseconds / 1e9  # Start circle timer
-                # Hold at takeoff point until altitude reached
-                self.publish_position_setpoint(0.0, 0.0, self.altitude)
-            else:
-                # Circle after reaching altitude
-                now = self.get_clock().now().nanoseconds / 1e9
-                t = now - self.start_time
-                theta = 2 * math.pi * (t % self.circle_duration) / self.circle_duration
-                x = self.center_x + self.radius * math.cos(theta)
-                y = self.center_y + self.radius * math.sin(theta)
-                z = self.altitude
-                self.publish_position_setpoint(x, y, z)
-                # Land after one circle + 5 seconds
-                if t > self.circle_duration + 5:
-                    self.land()
-                    exit(0)
-        else:
-            # Takeoff setpoint until in offboard and armed
-            self.publish_position_setpoint(0.0, 0.0, self.altitude)
+        if self.current_waypoint_index < len(self.waypoints) and self.start == 1:
+            waypoint = self.waypoints[self.current_waypoint_index]
+            self.publish_position_setpoint(*waypoint)
+
+            if (abs(self.vehicle_local_position.x - waypoint[0]) < 0.1 and
+                abs(self.vehicle_local_position.y - waypoint[1]) < 0.1 and
+                abs(self.vehicle_local_position.z - waypoint[2]) < 0.1):
+                self.current_waypoint_index += 1
+        elif self.current_waypoint_index == len(self.waypoints):
+            self.land()
+            rclpy.shutdown()
 
         if self.offboard_setpoint_counter < 11:
             self.offboard_setpoint_counter += 1
