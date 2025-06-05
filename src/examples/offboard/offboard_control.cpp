@@ -1,3 +1,6 @@
+/*
+ini buat yg path kotak
+*/
 /****************************************************************************
  *
  * Copyright 2020 PX4 Development Team. All rights reserved.
