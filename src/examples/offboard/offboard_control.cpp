@@ -43,14 +43,18 @@
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <stdint.h>
 #include <chrono>
 #include <iostream>
 #include <cmath>
+#include <vector>
+#include <limits>
 
-using namespace std::chrono;
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
+
+struct Waypoint {
+    float x, y, z;
+};
 
 class OffboardControl : public rclcpp::Node
 {
@@ -61,16 +65,11 @@ public:
         trajectory_setpoint_publisher_ = this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
         vehicle_command_publisher_ = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
 
-        offboard_setpoint_counter_ = 0;
-        land_command_sent_ = false;
-        current_z_ = 0.0; // Start on the ground
-        current_yaw_ = 0.0; // Will be updated from odometry
-
-        // Subscribe to vehicle odometry to get current yaw
-        odom_sub_ = this->create_subscription<VehicleOdometry>(
+        // Subscribe to odometry for yaw lock
+        odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/fmu/out/vehicle_odometry",
             rclcpp::QoS(10).best_effort(),
-            [this](const VehicleOdometry::SharedPtr msg) {
+            [this](const px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
                 float q0 = msg->q[0];
                 float q1 = msg->q[1];
                 float q2 = msg->q[2];
@@ -80,146 +79,182 @@ public:
             }
         );
 
+        // Mission waypoints (z is always -3.0)
+        waypoints_ = {
+            {0.0f, 0.0f, 4.0f}, // Takeoff point
+            {3.0f, 0.0f, 4.0f},
+            {3.0f, 3.0f, 4.0f},
+            {0.0f, 3.0f, 4.0f},
+            {0.0f, 0.0f, 4.0f}
+        };
+
+        current_x_ = 0.0f;
+        current_y_ = 0.0f;
+        current_z_ = 0.0f;
+        current_yaw_ = std::numeric_limits<float>::quiet_NaN(); // Not set yet
+        mission_state_ = TAKEOFF;
+        waypoint_idx_ = 0;
+        reached_time_ = this->now();
+
+        offboard_setpoint_counter_ = 0;
+
         auto timer_callback = [this]() -> void {
-            // After 10 setpoints, switch to offboard mode and arm
+            // Arm and switch to offboard after 10 setpoints
             if (offboard_setpoint_counter_ == 10) {
                 this->publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
                 this->arm();
             }
 
-            // 1. Takeoff: ascend to z = -3.0 (NED frame, so -3.0 means 3m above ground)
-            // Hold at (0,0,-3.0) for 5 seconds (50 cycles)
-            float x = 0.0, y = 0.0;
-            if (offboard_setpoint_counter_ > 20 && offboard_setpoint_counter_ <= 70) {
-                // Hold at (0,0,-3.0)
-                x = 0.0; y = 0.0;
-            } else if (offboard_setpoint_counter_ > 70 && offboard_setpoint_counter_ <= 120) {
-                // Move to (3,0,-3.0) and hold for 5s
-                x = 3.0; y = 0.0;
-            } else if (offboard_setpoint_counter_ > 120 && offboard_setpoint_counter_ <= 170) {
-                // Move to (3,3,-3.0) and hold for 5s
-                x = 3.0; y = 3.0;
-            } else if (offboard_setpoint_counter_ > 170 && offboard_setpoint_counter_ <= 220) {
-                // Move to (0,3,-3.0) and hold for 5s
-                x = 0.0; y = 3.0;
-            } else if (offboard_setpoint_counter_ > 220 && offboard_setpoint_counter_ <= 270) {
-                // Return to (0,0,-3.0) and hold for 5s
-                x = 0.0; y = 0.0;
+            // If yaw is not set yet, do nothing (wait for odometry)
+            if (std::isnan(current_yaw_)) {
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Waiting for odometry to lock yaw...");
+                publish_offboard_control_mode();
+                publish_trajectory_setpoint();
+                offboard_setpoint_counter_++;
+                return;
             }
 
-            // Set altitude and yaw (keep yaw constant)
-            current_z_ = -3.0;
+            switch (mission_state_) {
+                case TAKEOFF:
+                    // Takeoff to z = -3.0 at 0.3 m/s
+                    if (current_z_ > 4.0f) {
+                        current_z_ -= 0.3f * 0.1f; // 0.1s timer
+                        if (current_z_ < 4.0f) current_z_ = 4.0f;
+                    } else {
+                        mission_state_ = HOLD;
+                        reached_time_ = this->now();
+                        RCLCPP_INFO(this->get_logger(), "Takeoff complete, holding at (%.1f, %.1f, %.1f)", current_x_, current_y_, current_z_);
+                    }
+                    break;
+                case HOLD:
+                    // Wait 5 seconds at current waypoint
+                    if ((this->now() - reached_time_).seconds() >= 5.0) {
+                        if (waypoint_idx_ < waypoints_.size() - 1) {
+                            mission_state_ = GOTO;
+                            RCLCPP_INFO(this->get_logger(), "Proceeding to waypoint %zu: (%.1f, %.1f, %.1f)",
+                                waypoint_idx_ + 1,
+                                waypoints_[waypoint_idx_ + 1].x,
+                                waypoints_[waypoint_idx_ + 1].y,
+                                waypoints_[waypoint_idx_ + 1].z);
+                        } else {
+                            mission_state_ = LAND;
+                            RCLCPP_INFO(this->get_logger(), "Mission complete, landing...");
+                        }
+                    }
+                    break;
+                case GOTO: {
+                    // Move to next waypoint at 0.4 m/s
+                    const Waypoint& target = waypoints_[waypoint_idx_ + 1];
+                    float dx = target.x - current_x_;
+                    float dy = target.y - current_y_;
+                    float dz = target.z - current_z_;
+                    float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+                    float step = 0.2f * 0.1f; // 0.4 m/s * 0.1s
 
-            // Store the current mission setpoint for publishing
-            current_x_ = x;
-            current_y_ = y;
+                    if (dist < 0.05f) { // Arrived
+                        current_x_ = target.x;
+                        current_y_ = target.y;
+                        current_z_ = target.z;
+                        waypoint_idx_++;
+                        mission_state_ = HOLD;
+                        reached_time_ = this->now();
+                        RCLCPP_INFO(this->get_logger(), "Arrived at waypoint %zu: (%.1f, %.1f, %.1f)",
+                            waypoint_idx_,
+                            current_x_, current_y_, current_z_);
+                    } else {
+                        // Move towards target
+                        current_x_ += (dx/dist) * std::min(step, dist);
+                        current_y_ += (dy/dist) * std::min(step, dist);
+                        current_z_ += (dz/dist) * std::min(step, dist);
+                    }
+                    break;
+                }
+                case LAND:
+                    this->publish_vehicle_command(VehicleCommand::VEHICLE_CMD_NAV_LAND, 0.0, 0.0);
+                    RCLCPP_INFO_ONCE(this->get_logger(), "Landing command sent.");
+                    mission_state_ = DONE;
+                    break;
+                case DONE:
+                    // Do nothing
+                    break;
+            }
 
             publish_offboard_control_mode();
             publish_trajectory_setpoint();
-
-            // Land after completing the square and holding at the last point
-            if (offboard_setpoint_counter_ == 280 && !land_command_sent_) {
-                this->publish_vehicle_command(VehicleCommand::VEHICLE_CMD_NAV_LAND, 0.0, 0.0);
-                RCLCPP_INFO(this->get_logger(), "Land command sent");
-                land_command_sent_ = true;
-            }
-
-            // Disarm 2 seconds after land command
-            if (offboard_setpoint_counter_ == 300 && land_command_sent_) {
-                this->disarm();
-                RCLCPP_INFO(this->get_logger(), "Disarm command sent after landing (timed)");
-                land_command_sent_ = false;
-            }
-
-            if (offboard_setpoint_counter_ < 320) {
-                offboard_setpoint_counter_++;
-            }
+            offboard_setpoint_counter_++;
         };
         timer_ = this->create_wall_timer(100ms, timer_callback);
     }
 
-    void arm();
-    void disarm();
-
 private:
-    rclcpp::TimerBase::SharedPtr timer_;
+    enum MissionState { TAKEOFF, HOLD, GOTO, LAND, DONE };
+    MissionState mission_state_;
+    std::vector<Waypoint> waypoints_;
+    size_t waypoint_idx_;
+    rclcpp::Time reached_time_;
 
+    // Publishers
+    rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_publisher_;
     rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
     rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher_;
-    rclcpp::Subscription<VehicleOdometry>::SharedPtr odom_sub_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
 
-    std::atomic<uint64_t> timestamp_;
-
+    // Variables
     uint64_t offboard_setpoint_counter_;
-    bool land_command_sent_;
-    float current_z_; // Track current altitude setpoint
-    float current_yaw_; // Track current yaw from odometry
-    float current_x_ = 0.0;
-    float current_y_ = 0.0;
+    float current_z_;
+    float current_x_;
+    float current_y_;
+    float current_yaw_;
 
-    void publish_offboard_control_mode();
-    void publish_trajectory_setpoint();
-    void publish_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
+    void publish_offboard_control_mode()
+    {
+        OffboardControlMode msg{};
+        msg.position = true;
+        msg.velocity = false;
+        msg.acceleration = false;
+        msg.attitude = false;
+        msg.body_rate = false;
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        offboard_control_mode_publisher_->publish(msg);
+    }
+
+    void publish_trajectory_setpoint()
+    {
+        TrajectorySetpoint msg{};
+        msg.position = {current_x_, current_y_, current_z_};
+        msg.yaw = current_yaw_; // Always use current yaw from odometry
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        trajectory_setpoint_publisher_->publish(msg);
+    }
+
+    void publish_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0)
+    {
+        VehicleCommand msg{};
+        msg.param1 = param1;
+        msg.param2 = param2;
+        msg.command = command;
+        msg.target_system = 1;
+        msg.target_component = 1;
+        msg.source_system = 1;
+        msg.source_component = 1;
+        msg.from_external = true;
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        vehicle_command_publisher_->publish(msg);
+    }
+
+    void arm()
+    {
+        publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0);
+        RCLCPP_INFO(this->get_logger(), "Arm command send");
+    }
+
+    void disarm()
+    {
+        publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0);
+        RCLCPP_INFO(this->get_logger(), "Disarm command send");
+    }
 };
-
-/**
- * @brief Send a command to Arm the vehicle
- */
-void OffboardControl::arm()
-{
-    publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0);
-    RCLCPP_INFO(this->get_logger(), "Arm command send");
-}
-
-/**
- * @brief Send a command to Disarm the vehicle
- */
-void OffboardControl::disarm()
-{
-    publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0);
-    RCLCPP_INFO(this->get_logger(), "Disarm command send");
-}
-
-/**
- * @brief Publish the offboard control mode.
- *        For this example, only position and altitude controls are active.
- */
-void OffboardControl::publish_offboard_control_mode()
-{
-    OffboardControlMode msg{};
-    msg.position = true;      // Enable position control
-    msg.velocity = false;     // Disable velocity control
-    msg.acceleration = false; // Disable acceleration control
-    msg.attitude = false;
-    msg.body_rate = false;
-    msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-    offboard_control_mode_publisher_->publish(msg);
-}
-
-void OffboardControl::publish_trajectory_setpoint()
-{
-    TrajectorySetpoint msg{};
-    msg.position = {current_x_, current_y_, current_z_}; // Use current_x_, current_y_, current_z_
-    msg.yaw = current_yaw_; // Keep yaw fixed
-    msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-    trajectory_setpoint_publisher_->publish(msg);
-}
-
-void OffboardControl::publish_vehicle_command(uint16_t command, float param1, float param2)
-{
-    VehicleCommand msg{};
-    msg.param1 = param1;
-    msg.param2 = param2;
-    msg.command = command;
-    msg.target_system = 1;
-    msg.target_component = 1;
-    msg.source_system = 1;
-    msg.source_component = 1;
-    msg.from_external = true;
-    msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-    vehicle_command_publisher_->publish(msg);
-}
 
 int main(int argc, char *argv[])
 {
