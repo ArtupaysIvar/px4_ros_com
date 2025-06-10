@@ -59,7 +59,7 @@ using namespace px4_msgs::msg;
 class OffboardControl : public rclcpp::Node
 {
 public:
-    OffboardControl() : Node("offboard_control")
+    OffboardControl() : Node("offboard_control1")
     {
         offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>("/fmu/in/offboard_control_mode", 10);
         trajectory_setpoint_publisher_ = this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);

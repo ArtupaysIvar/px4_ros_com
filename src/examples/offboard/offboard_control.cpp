@@ -1,38 +1,6 @@
 /*
 ini buat yg path kotak
 */
-/****************************************************************************
- *
- * Copyright 2020 PX4 Development Team. All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- * list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * 3. Neither the name of the copyright holder nor the names of its contributors
- * may be used to endorse or promote products derived from this software without
- * specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- *
- ****************************************************************************/
-
 /**
  * @brief Offboard control example
  * @file offboard_control.cpp
@@ -55,6 +23,7 @@ ini buat yg path kotak
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
 
+// this is new
 struct Waypoint {
     float x, y, z;
 };
@@ -68,7 +37,14 @@ public:
         trajectory_setpoint_publisher_ = this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
         vehicle_command_publisher_ = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
 
-        // Subscribe to odometry for yaw lock
+        // For averaging initial position
+        collecting_initial_pos_ = true;
+        initial_pos_samples_ = 0;
+        initial_x_sum_ = 0.0f;
+        initial_y_sum_ = 0.0f;
+        initial_z_sum_ = 0.0f;
+        initial_collect_start_ = this->now();
+
         odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/fmu/out/vehicle_odometry",
             rclcpp::QoS(10).best_effort(),
@@ -79,18 +55,44 @@ public:
                 float q3 = msg->q[3];
                 current_yaw_ = std::atan2(2.0f * (q0 * q3 + q1 * q2),
                                           1.0f - 2.0f * (q2 * q2 + q3 * q3));
+                // Collect initial position samples for averaging, with outlier rejection
+                if (collecting_initial_pos_) {
+                    // Calculate running mean for comparison
+                    float mean_x = (initial_pos_samples_ > 0) ? (initial_x_sum_ / initial_pos_samples_) : msg->position[0];
+                    float mean_y = (initial_pos_samples_ > 0) ? (initial_y_sum_ / initial_pos_samples_) : msg->position[1];
+                    float mean_z = (initial_pos_samples_ > 0) ? (initial_z_sum_ / initial_pos_samples_) : msg->position[2];
+
+                    // Threshold for outlier rejection (e.g., 2 meters)
+                    float threshold = 2.0f;
+                    if (std::abs(msg->position[0] - mean_x) < threshold &&
+                        std::abs(msg->position[1] - mean_y) < threshold &&
+                        std::abs(msg->position[2] - mean_z) < threshold) {
+                        initial_x_sum_ += msg->position[0];
+                        initial_y_sum_ += msg->position[1];
+                        initial_z_sum_ += msg->position[2];
+                        initial_pos_samples_++; // Only increment for accepted samples
+                    } else {
+                        RCLCPP_WARN(this->get_logger(), "Outlier detected in initial position sample: (%.2f, %.2f, %.2f)", 
+                            msg->position[0], msg->position[1], msg->position[2]);
+                    }
+                }
+                // Always update current position
+                current_x_ = msg->position[0];
+                current_y_ = msg->position[1];
+                current_z_ = msg->position[2];
             }
         );
-
+        // bikin matrix?
         // Mission waypoints (z is always -3.0)
         waypoints_ = {
-            {0.0f, 0.0f, 4.0f}, // Takeoff point
-            {3.0f, 0.0f, 4.0f},
-            {3.0f, 3.0f, 4.0f},
-            {0.0f, 3.0f, 4.0f},
-            {0.0f, 0.0f, 4.0f}
+ // Takeoff point
+            {3.0f, 0.0f, -3.0f},
+            {3.0f, 3.0f, -3.0f},
+            {0.0f, 3.0f, -3.0f},
+            {0.0f, 0.0f, -3.0f}
         };
 
+        //inisialisasi variabel
         current_x_ = 0.0f;
         current_y_ = 0.0f;
         current_z_ = 0.0f;
@@ -99,9 +101,48 @@ public:
         waypoint_idx_ = 0;
         reached_time_ = this->now();
 
+        // ini sama lagi
         offboard_setpoint_counter_ = 0;
 
         auto timer_callback = [this]() -> void {
+            // Collect initial position for 10 seconds before takeoff
+            if (collecting_initial_pos_) {
+                if ((this->now() - initial_collect_start_).seconds() < 10.0) {
+                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Collecting initial position samples...");
+                    publish_offboard_control_mode();
+                    publish_trajectory_setpoint();
+                    offboard_setpoint_counter_++;
+                    return;
+                } else {
+                    // Calculate average buat jadi initial position
+                    if (initial_pos_samples_ > 0) {
+                        initial_x_avg_ = initial_x_sum_ / initial_pos_samples_;
+                        initial_y_avg_ = initial_y_sum_ / initial_pos_samples_;
+                        initial_z_avg_ = initial_z_sum_ / initial_pos_samples_;
+                    } else {
+                        initial_x_avg_ = current_x_;
+                        initial_y_avg_ = current_y_;
+                        initial_z_avg_ = current_z_;
+                    }
+                    // Show average before normalization
+                    RCLCPP_INFO(this->get_logger(), "Avg initial pos before normalization: (%.3f, %.3f, %.3f)", initial_x_avg_, initial_y_avg_, initial_z_avg_);
+                    // Normalize current position and waypoints (normalisasi posisi)
+                    current_x_ -= initial_x_avg_;
+                    current_y_ -= initial_y_avg_;
+                    current_z_ -= initial_z_avg_;
+                    for (auto& wp : waypoints_) {
+                        wp.x -= initial_x_avg_;
+                        wp.y -= initial_y_avg_;
+                        wp.z -= initial_z_avg_;
+                    }
+                    collecting_initial_pos_ = false;
+                    RCLCPP_INFO(this->get_logger(), "Initial position normalized to (0,0,0)");
+
+                    // Immediately start arming/offboard after normalization
+                    offboard_setpoint_counter_ = 10; // Force arming logic to trigger
+                }
+            }
+
             // Arm and switch to offboard after 10 setpoints
             if (offboard_setpoint_counter_ == 10) {
                 this->publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
@@ -116,13 +157,13 @@ public:
                 offboard_setpoint_counter_++;
                 return;
             }
-
+            // baru
             switch (mission_state_) {
                 case TAKEOFF:
                     // Takeoff to z = -3.0 at 0.3 m/s
-                    if (current_z_ > 4.0f) {
+                    if (current_z_ > -3.0f) {
                         current_z_ -= 0.3f * 0.1f; // 0.1s timer
-                        if (current_z_ < 4.0f) current_z_ = 4.0f;
+                        if (current_z_ < -3.0f) current_z_ = -3.0f;
                     } else {
                         mission_state_ = HOLD;
                         reached_time_ = this->now();
@@ -181,7 +222,7 @@ public:
                     // Do nothing
                     break;
             }
-
+            // sampe sini masih baru
             publish_offboard_control_mode();
             publish_trajectory_setpoint();
             offboard_setpoint_counter_++;
@@ -190,6 +231,7 @@ public:
     }
 
 private:
+    // apa itu mission states?
     enum MissionState { TAKEOFF, HOLD, GOTO, LAND, DONE };
     MissionState mission_state_;
     std::vector<Waypoint> waypoints_;
@@ -203,12 +245,19 @@ private:
     rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher_;
     rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
 
-    // Variables
+    // Variables (ini bikin baru)
     uint64_t offboard_setpoint_counter_;
     float current_z_;
     float current_x_;
     float current_y_;
     float current_yaw_;
+
+    // For initial position normalization
+    bool collecting_initial_pos_;
+    int initial_pos_samples_;
+    float initial_x_sum_, initial_y_sum_, initial_z_sum_;
+    float initial_x_avg_, initial_y_avg_, initial_z_avg_;
+    rclcpp::Time initial_collect_start_;
 
     void publish_offboard_control_mode()
     {
@@ -225,8 +274,8 @@ private:
     void publish_trajectory_setpoint()
     {
         TrajectorySetpoint msg{};
-        msg.position = {current_x_, current_y_, current_z_};
-        msg.yaw = current_yaw_; // Always use current yaw from odometry
+        msg.position = {current_x_, current_y_, current_z_}; // sebenernya dikirim kesini semua
+        msg.yaw = current_yaw_; // Always use current yaw from odometry which is locked
         msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
         trajectory_setpoint_publisher_->publish(msg);
     }

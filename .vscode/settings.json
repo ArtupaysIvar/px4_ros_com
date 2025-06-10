@@ -1,6 +1,19 @@
 {
     "files.associations": {
         "chrono": "cpp",
-        "ostream": "cpp"
-    }
+        "ostream": "cpp",
+        "array": "cpp"
+    },
+    "python.autoComplete.extraPaths": [
+        "/home/artupays/drone_code_ws/install/px4_ros_com/local/lib/python3.10/dist-packages",
+        "/home/artupays/drone_code_ws/install/px4_msgs/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/artupays/drone_code_ws/install/px4_ros_com/local/lib/python3.10/dist-packages",
+        "/home/artupays/drone_code_ws/install/px4_msgs/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/opt/ros/humble/local/lib/python3.10/dist-packages"
+    ]
 }
