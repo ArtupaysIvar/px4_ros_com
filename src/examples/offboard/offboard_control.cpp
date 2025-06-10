@@ -37,19 +37,10 @@ public:
                                           1.0f - 2.0f * (q2 * q2 + q3 * q3));
 
                 if (collecting_initial_pos_) {
-                    float mean_x = (initial_pos_samples_ > 0) ? (initial_x_sum_ / initial_pos_samples_) : msg->position[0];
-                    float mean_y = (initial_pos_samples_ > 0) ? (initial_y_sum_ / initial_pos_samples_) : msg->position[1];
-                    float mean_z = (initial_pos_samples_ > 0) ? (initial_z_sum_ / initial_pos_samples_) : msg->position[2];
-
-                    float threshold = 2.0f;
-                    if (std::abs(msg->position[0] - mean_x) < threshold &&
-                        std::abs(msg->position[1] - mean_y) < threshold &&
-                        std::abs(msg->position[2] - mean_z) < threshold) {
-                        initial_x_sum_ += msg->position[0];
-                        initial_y_sum_ += msg->position[1];
-                        initial_z_sum_ += msg->position[2];
-                        initial_pos_samples_++;
-                    }
+                    initial_x_sum_ += msg->position[0];
+                    initial_y_sum_ += msg->position[1];
+                    initial_z_sum_ += msg->position[2];
+                    initial_pos_samples_++;
                 }
 
                 current_x_ = msg->position[0];
@@ -58,6 +49,7 @@ public:
             }
         );
 
+        // Local square trajectory
         waypoints_ = {
             {0.0f, 0.0f, -3.0f},
             {3.0f, 0.0f, -3.0f},
@@ -66,52 +58,27 @@ public:
             {0.0f, 0.0f, -3.0f}
         };
 
-        current_x_ = current_y_ = current_z_ = 0.0f;
-        current_yaw_ = std::numeric_limits<float>::quiet_NaN();
         mission_state_ = TAKEOFF;
         waypoint_idx_ = 0;
-        reached_time_ = this->now();
-
         offboard_setpoint_counter_ = 0;
-
-        collecting_initial_pos_ = true;
         initial_pos_samples_ = 0;
-        initial_x_sum_ = initial_y_sum_ = initial_z_sum_ = 0.0f;
+        collecting_initial_pos_ = true;
         initial_collect_start_ = this->now();
 
         timer_ = this->create_wall_timer(100ms, [this]() {
             if (collecting_initial_pos_) {
-                if ((this->now() - initial_collect_start_).seconds() < 10.0) {
-                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Collecting initial position samples...");
+                if ((this->now() - initial_collect_start_).seconds() < 2.0) {
+                    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Collecting initial position...");
                     publish_offboard_control_mode();
                     publish_trajectory_setpoint();
                     offboard_setpoint_counter_++;
                     return;
                 } else {
-                    if (initial_pos_samples_ > 0) {
-                        initial_x_avg_ = initial_x_sum_ / initial_pos_samples_;
-                        initial_y_avg_ = initial_y_sum_ / initial_pos_samples_;
-                        initial_z_avg_ = initial_z_sum_ / initial_pos_samples_;
-                    } else {
-                        initial_x_avg_ = current_x_;
-                        initial_y_avg_ = current_y_;
-                        initial_z_avg_ = current_z_;
-                    }
-                    // log the initial position
-RCLCPP_INFO(this->get_logger(), "Initial position: x=%.2f, y=%.2f, z=%.2f", 
-            initial_x_avg_, initial_y_avg_, initial_z_avg_);
-
-                    current_x_ -= initial_x_avg_;
-                    current_y_ -= initial_y_avg_;
-                    current_z_ -= initial_z_avg_;
-                    
-                    for (auto &wp : waypoints_) {
-                    wp.x -= initial_x_avg_;
-                    wp.y -= initial_y_avg_;
-                    wp.z -= initial_z_avg_;
-                }
+                    initial_x_avg_ = initial_x_sum_ / std::max(initial_pos_samples_, 1);
+                    initial_y_avg_ = initial_y_sum_ / std::max(initial_pos_samples_, 1);
+                    initial_z_avg_ = initial_z_sum_ / std::max(initial_pos_samples_, 1);
                     collecting_initial_pos_ = false;
-                    RCLCPP_INFO(this->get_logger(), "Initial position normalized.");
+                    RCLCPP_INFO(this->get_logger(), "Initial pos: x=%.2f y=%.2f z=%.2f", initial_x_avg_, initial_y_avg_, initial_z_avg_);
                     offboard_setpoint_counter_ = 0;
                 }
             }
@@ -122,63 +89,37 @@ RCLCPP_INFO(this->get_logger(), "Initial position: x=%.2f, y=%.2f, z=%.2f",
             }
 
             if (std::isnan(current_yaw_)) {
-                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Waiting for odometry yaw...");
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Waiting for yaw...");
                 publish_offboard_control_mode();
                 publish_trajectory_setpoint();
                 offboard_setpoint_counter_++;
                 return;
             }
 
-            switch (mission_state_) {
-                case TAKEOFF:
-                    if (current_z_ > -3.0f) {
-                        current_z_ -= 3.0f * 0.1f; //speed of 3 m/s
-                        if (current_z_ < -3.0f) current_z_ = -3.0f;
-                    } else {
-                        mission_state_ = HOLD;
-                        reached_time_ = this->now();
-                        RCLCPP_INFO(this->get_logger(), "Takeoff complete.");
-                    }
-                    break;
-                case HOLD:
-                    if ((this->now() - reached_time_).seconds() >= 5.0) {
-                        if (waypoint_idx_ < waypoints_.size() - 1) {
-                            mission_state_ = GOTO;
-                        } else {
-                            mission_state_ = LAND;
-                            RCLCPP_INFO(this->get_logger(), "All waypoints done. Landing...");
-                        }
-                    }
-                    break;
-                case GOTO: {
-                    const Waypoint &target = waypoints_[waypoint_idx_ + 1];
-                    float dx = target.x - current_x_;
-                    float dy = target.y - current_y_;
-                    float dz = target.z - current_z_;
-                    float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-                    float step = 3.0f * 0.1f; //speed of 3 m/s
+            const Waypoint &target_local = waypoints_[waypoint_idx_];
+            float target_x = target_local.x + initial_x_avg_;
+            float target_y = target_local.y + initial_y_avg_;
+            float target_z = target_local.z + initial_z_avg_;
 
-                    if (dist < 0.05f) {
-                        current_x_ = target.x;
-                        current_y_ = target.y;
-                        current_z_ = target.z;
-                        waypoint_idx_++;
-                        mission_state_ = HOLD;
-                        reached_time_ = this->now();
-                        RCLCPP_INFO(this->get_logger(), "Reached waypoint %zu", waypoint_idx_);
-                    } else {
-                        current_x_ += (dx / dist) * std::min(step, dist);
-                        current_y_ += (dy / dist) * std::min(step, dist);
-                        current_z_ += (dz / dist) * std::min(step, dist);
-                    }
-                    break;
-                }
-                case LAND:
+            float dx = target_x - current_x_;
+            float dy = target_y - current_y_;
+            float dz = target_z - current_z_;
+            float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+            float step = 0.3f; // 3 m/s * 0.1s
+            if (dist < 0.1f) {
+                waypoint_idx_++;
+                if (waypoint_idx_ >= waypoints_.size()) {
                     publish_vehicle_command(VehicleCommand::VEHICLE_CMD_NAV_LAND, 0.0, 0.0);
+                    RCLCPP_INFO(this->get_logger(), "Landing initiated.");
                     mission_state_ = DONE;
-                    break;
-                case DONE:
-                    break;
+                } else {
+                    RCLCPP_INFO(this->get_logger(), "Reached waypoint %zu", waypoint_idx_);
+                }
+            } else {
+                current_x_ += (dx / dist) * std::min(step, dist);
+                current_y_ += (dy / dist) * std::min(step, dist);
+                current_z_ += (dz / dist) * std::min(step, dist);
             }
 
             publish_offboard_control_mode();
@@ -188,11 +129,10 @@ RCLCPP_INFO(this->get_logger(), "Initial position: x=%.2f, y=%.2f, z=%.2f",
     }
 
 private:
-    enum MissionState { TAKEOFF, HOLD, GOTO, LAND, DONE };
+    enum MissionState { TAKEOFF, DONE };
     MissionState mission_state_;
     std::vector<Waypoint> waypoints_;
     size_t waypoint_idx_;
-    rclcpp::Time reached_time_;
 
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_publisher_;
@@ -214,10 +154,6 @@ private:
     {
         OffboardControlMode msg{};
         msg.position = true;
-        msg.velocity = false;
-        msg.acceleration = false;
-        msg.attitude = false;
-        msg.body_rate = false;
         msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
         offboard_control_mode_publisher_->publish(msg);
     }
