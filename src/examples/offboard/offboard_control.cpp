@@ -59,6 +59,7 @@ public:
         );
 
         waypoints_ = {
+            {0.0f, 0.0f, -3.0f},
             {3.0f, 0.0f, -3.0f},
             {3.0f, 3.0f, -3.0f},
             {0.0f, 3.0f, -3.0f},
@@ -96,16 +97,19 @@ public:
                         initial_y_avg_ = current_y_;
                         initial_z_avg_ = current_z_;
                     }
+                    // log the initial position
+RCLCPP_INFO(this->get_logger(), "Initial position: x=%.2f, y=%.2f, z=%.2f", 
+            initial_x_avg_, initial_y_avg_, initial_z_avg_);
 
                     current_x_ -= initial_x_avg_;
                     current_y_ -= initial_y_avg_;
                     current_z_ -= initial_z_avg_;
+                    
                     for (auto &wp : waypoints_) {
-                        wp.x -= initial_x_avg_;
-                        wp.y -= initial_y_avg_;
-                        wp.z -= initial_z_avg_;
-                    }
-
+                    wp.x -= initial_x_avg_;
+                    wp.y -= initial_y_avg_;
+                    wp.z -= initial_z_avg_;
+                }
                     collecting_initial_pos_ = false;
                     RCLCPP_INFO(this->get_logger(), "Initial position normalized.");
                     offboard_setpoint_counter_ = 0;
