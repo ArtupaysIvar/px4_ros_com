@@ -73,7 +73,7 @@ install(TARGETS offboard_control_srv DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/coba_coba
 add_executable(coba_coba src/examples/offboard/coba_coba.cpp)
-ament_target_dependencies(coba_coba rclcpp px4_msgs)
+ament_target_dependencies(coba_coba rclcpp px4_msgs geometry_msgs)
 install(TARGETS coba_coba DESTINATION lib/${PROJECT_NAME})
 
 
