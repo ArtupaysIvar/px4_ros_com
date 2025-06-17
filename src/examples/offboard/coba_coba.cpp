@@ -4,6 +4,7 @@
 #include <px4_msgs/msg/vehicle_local_position_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
+#include <cmath>
 
 using std::placeholders::_1;
 
@@ -14,24 +15,22 @@ public:
   {
     using namespace std::chrono_literals;
 
-    // Publishers
     offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>("/fmu/in/offboard_control_mode", 10);
     vehicle_command_pub_ = create_publisher<px4_msgs::msg::VehicleCommand>("/fmu/in/vehicle_command", 10);
     trajectory_setpoint_pub_ = create_publisher<px4_msgs::msg::VehicleLocalPositionSetpoint>("/fmu/in/trajectory_setpoint", 10);
-
-    // Subscribers
+    odom_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
+      "/fmu/out/vehicle_odometry", 10, std::bind(&ArucoLandingNode::odom_callback, this, _1));
     aruco_sub_ = create_subscription<geometry_msgs::msg::PoseArray>(
       "/aruco_visualization", 10, std::bind(&ArucoLandingNode::aruco_callback, this, _1));
 
-    // Timer
     timer_ = create_wall_timer(100ms, std::bind(&ArucoLandingNode::control_loop, this));
 
-    // Init state
     setpoint_sent_ = false;
     landed_ = false;
     aruco_detected_ = false;
+    current_yaw_ = std::numeric_limits<float>::quiet_NaN();
+    current_x_ = current_y_ = current_z_ = 0.0;
 
-    // Arm and set to offboard
     arm();
     set_offboard_mode();
   }
@@ -40,14 +39,14 @@ private:
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
   rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_pub_;
   rclcpp::Publisher<px4_msgs::msg::VehicleLocalPositionSetpoint>::SharedPtr trajectory_setpoint_pub_;
-
   rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr aruco_sub_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
-  bool setpoint_sent_;
-  bool landed_;
-  bool aruco_detected_;
+  bool setpoint_sent_, landed_, aruco_detected_;
   geometry_msgs::msg::Pose aruco_pose_;
+  float current_x_, current_y_, current_z_;
+  float current_yaw_;
 
   void arm()
   {
@@ -66,8 +65,8 @@ private:
   {
     auto msg = px4_msgs::msg::VehicleCommand();
     msg.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
-    msg.param1 = 1;  // custom mode
-    msg.param2 = 6;  // PX4 OFFBOARD mode
+    msg.param1 = 1;
+    msg.param2 = 6;
     msg.target_system = 1;
     msg.target_component = 1;
     msg.source_system = 1;
@@ -80,10 +79,6 @@ private:
   {
     px4_msgs::msg::OffboardControlMode msg{};
     msg.position = true;
-    msg.velocity = false;
-    msg.acceleration = false;
-    msg.attitude = false;
-    msg.body_rate = false;
     msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     offboard_control_mode_pub_->publish(msg);
   }
@@ -98,15 +93,28 @@ private:
     }
   }
 
+  void odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
+  {
+    float q0 = msg->q[0];
+    float q1 = msg->q[1];
+    float q2 = msg->q[2];
+    float q3 = msg->q[3];
+    current_yaw_ = std::atan2(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2 * q2 + q3 * q3));
+    current_x_ = msg->position[0];
+    current_y_ = msg->position[1];
+    current_z_ = msg->position[2];
+  }
+
   void control_loop()
   {
     send_offboard_control_mode();
-
     auto sp = px4_msgs::msg::VehicleLocalPositionSetpoint();
     sp.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+    sp.yaw = current_yaw_;
 
     if (!setpoint_sent_) {
-      // Initial takeoff to 5m
+      sp.x = current_x_;
+      sp.y = current_y_;
       sp.z = -5.0;
       trajectory_setpoint_pub_->publish(sp);
       setpoint_sent_ = true;
@@ -115,16 +123,25 @@ private:
 
     if (landed_) return;
 
-    // If ArUco detected and it's centered under the drone
     if (aruco_detected_) {
-      float x = aruco_pose_.position.x;
-      float y = aruco_pose_.position.y;
+      float ax = aruco_pose_.position.x;
+      float ay = aruco_pose_.position.y;
 
-      if (std::abs(x) < 0.03 && std::abs(y) < 0.03) {
-        // It's directly below
+      float threshold = 0.03;
+      float k = 0.5;
+
+      if (std::abs(ax) < threshold && std::abs(ay) < threshold) {
         land();
         landed_ = true;
+        return;
       }
+
+      // Move towards marker
+      sp.x = current_x_ + k * ax;
+      sp.y = current_y_ + k * ay;  // RIGHT marker = NEGATIVE y => drone must move RIGHT (i.e., -y)
+      sp.z = current_z_;
+
+      trajectory_setpoint_pub_->publish(sp);
     }
   }
 
