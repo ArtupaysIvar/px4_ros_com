@@ -45,13 +45,16 @@ private:
     bool offboard_enabled_ = false;
     bool mission_started_ = false;
     bool landing_initiated_ = false;
+    bool initial_pos_recorded_ = false;
 
     float current_z_ = 0.0f;
     float current_yaw_ = 0.0f;
     float current_x_ = 0.0f;
     float current_y_ = 0.0f;
 
-    float mission_target_x_ = 3.0f;
+    float initial_x_ = 0.0f;
+    float initial_y_ = 0.0f;
+    float mission_target_x_ = 0.0f;
     float mission_target_y_ = 0.0f;
     float mission_target_z_ = -3.0f;
 
@@ -76,6 +79,15 @@ private:
         float q0 = msg->q[0], q1 = msg->q[1], q2 = msg->q[2], q3 = msg->q[3];
         current_yaw_ = std::atan2(2.0f * (q0 * q3 + q1 * q2),
                                   1.0f - 2.0f * (q2 * q2 + q3 * q3));
+
+        if (!initial_pos_recorded_) {
+            initial_x_ = current_x_;
+            initial_y_ = current_y_;
+            mission_target_x_ = initial_x_ + 3.0f;  // Move 3 meters forward from initial
+            mission_target_y_ = initial_y_;
+            initial_pos_recorded_ = true;
+            RCLCPP_INFO(this->get_logger(), "Initial pos recorded: x=%.2f y=%.2f z=%.2f", initial_x_, initial_y_, current_z_);
+        }
     }
 
     void control_loop()
@@ -191,4 +203,3 @@ int main(int argc, char *argv[])
     rclcpp::shutdown();
     return 0;
 }
-
