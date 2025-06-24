@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 project(px4_ros_com)
 
 # Default to C99
@@ -25,6 +25,9 @@ find_package(px4_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(rclpy REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(OpenCV REQUIRED)
+find_package(std_msgs REQUIRED)
 
 #################
 # Setup targets #
@@ -68,7 +71,8 @@ install(TARGETS offboard_control1 DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/offboard_control_srv
 add_executable(offboard_control_srv src/examples/offboard/offboard_control_srv.cpp)
-ament_target_dependencies(offboard_control_srv rclcpp px4_msgs)
+ament_target_dependencies(offboard_control_srv rclcpp px4_msgs std_msgs sensor_msgs cv_bridge)
+target_link_libraries(offboard_control_srv ${OpenCV_LIBS}) 
 install(TARGETS offboard_control_srv DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/coba_coba

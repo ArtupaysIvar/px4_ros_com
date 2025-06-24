@@ -1,188 +1,296 @@
-/****************************************************************************
- *
- * Copyright 2020 PX4 Development Team. All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- * list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * 3. Neither the name of the copyright holder nor the names of its contributors
- * may be used to endorse or promote products derived from this software without
- * specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- *
- ****************************************************************************/
-
-/**
- * @brief Offboard control example
- * @file offboard_control.cpp
- * @addtogroup examples
- * @author Mickey Cowden <info@cowden.tech>
- * @author Nuno Marques <nuno.marques@dronesolutions.io>
- */
-
-#include <px4_msgs/msg/offboard_control_mode.hpp>
-#include <px4_msgs/msg/trajectory_setpoint.hpp>
-#include <px4_msgs/msg/vehicle_command.hpp>
-#include <px4_msgs/msg/vehicle_control_mode.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <stdint.h>
+#include <std_msgs/msg/int32.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <cv_bridge/cv_bridge.h>
+#include <opencv2/opencv.hpp>
+#include <opencv2/features2d.hpp>
+#include <deque>
+#include <vector>
 
-#include <chrono>
-#include <iostream>
-
-using namespace std::chrono;
-using namespace std::chrono_literals;
-using namespace px4_msgs::msg;
-
-class OffboardControl : public rclcpp::Node
+class ROIObstacleDetectorNode : public rclcpp::Node
 {
 public:
-	OffboardControl() : Node("offboard_control_srv")
-	{
+    ROIObstacleDetectorNode()
+    : Node("roi_obstacle_detector_node")
+    {
+        image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
+            "/image_raw", rclcpp::SensorDataQoS(),
+            std::bind(&ROIObstacleDetectorNode::imageCallback, this, std::placeholders::_1));
 
-		offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>("/fmu/in/offboard_control_mode", 10);
-		trajectory_setpoint_publisher_ = this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
-		vehicle_command_publisher_ = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
+        detection_pub_ = this->create_publisher<std_msgs::msg::Int32>("/obstacle_detected", 10);
+        debug_image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/debug/image_roi_orb", 10);
 
-		offboard_setpoint_counter_ = 0;
+        // Use ORB for better performance and reliability
+        detector_ = cv::ORB::create(800);  // Reduced since we're using ROI
+        matcher_ = cv::BFMatcher::create(cv::NORM_HAMMING, false); // Use kNN matching
 
-		auto timer_callback = [this]() -> void {
+        // Initialize parameters (tunable)
+        kp_ratio_threshold_ = 1.15;
+        area_ratio_threshold_ = 1.3;
+        min_matches_ = 8; // Reduced for ROI
+        match_ratio_threshold_ = 0.75; // For Lowe's ratio test
+        
+        // Fixed center ROI parameters (following Al-Kaff paper approach)
+        roi_margin_x_ = 0.25; // 25% margin from sides (center 50% width)
+        roi_margin_y_ = 0.25; // 25% margin from top/bottom (center 50% height)
 
-			if (offboard_setpoint_counter_ == 10) {
-				// Change to Offboard mode after 10 setpoints
-				this->publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
-
-				// Arm the vehicle
-				this->arm();
-			}
-
-			// offboard_control_mode needs to be paired with trajectory_setpoint
-			publish_offboard_control_mode();
-			publish_trajectory_setpoint();
-
-			// stop the counter after reaching 11
-			if (offboard_setpoint_counter_ < 11) {
-				offboard_setpoint_counter_++;
-			}
-		};
-		timer_ = this->create_wall_timer(100ms, timer_callback);
-	}
-
-	void arm();
-	void disarm();
+        RCLCPP_INFO(this->get_logger(), "Fixed center ROI obstacle detector initialized.");
+    }
 
 private:
-	rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr detection_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr debug_image_pub_;
 
-	rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_publisher_;
-	rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
-	rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher_;
+    cv::Mat prev_image_;
+    std::vector<cv::KeyPoint> prev_keypoints_;
+    cv::Mat prev_descriptors_;
+    cv::Rect prev_roi_;
+    bool has_prev_frame_ = false;
 
-	std::atomic<uint64_t> timestamp_;   //!< common synced timestamped
+    cv::Ptr<cv::ORB> detector_;
+    cv::Ptr<cv::BFMatcher> matcher_;
 
-	uint64_t offboard_setpoint_counter_;   //!< counter for the number of setpoints sent
+    // Tunable parameters
+    double kp_ratio_threshold_;
+    double area_ratio_threshold_;
+    int min_matches_;
+    double match_ratio_threshold_;
+    
+    // ROI parameters (fixed center approach)
+    double roi_margin_x_;
+    double roi_margin_y_;
 
-	void publish_offboard_control_mode();
-	void publish_trajectory_setpoint();
-	void publish_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
+    cv::Rect calculateFixedCenterROI(const cv::Mat& image)
+    {
+        int img_width = image.cols;
+        int img_height = image.rows;
+        
+        // Fixed center ROI following Al-Kaff paper approach
+        // Focus on center region where obstacles are most critical for UAV navigation
+        int margin_x = static_cast<int>(img_width * roi_margin_x_);
+        int margin_y = static_cast<int>(img_height * roi_margin_y_);
+        
+        int roi_x = margin_x;
+        int roi_y = margin_y;
+        int roi_width = img_width - 2 * margin_x;
+        int roi_height = img_height - 2 * margin_y;
+        
+        return cv::Rect(roi_x, roi_y, roi_width, roi_height);
+    }
+
+    cv::Mat createROIMask(const cv::Mat& image, const cv::Rect& roi)
+    {
+        cv::Mat mask = cv::Mat::zeros(image.size(), CV_8UC1);
+        mask(roi) = 255;
+        return mask;
+    }
+
+    std::vector<cv::DMatch> filterMatchesWithRatioTest(const std::vector<std::vector<cv::DMatch>>& knn_matches)
+    {
+        std::vector<cv::DMatch> good_matches;
+        
+        for (const auto& match_pair : knn_matches) {
+            if (match_pair.size() == 2) {
+                const cv::DMatch& m = match_pair[0];
+                const cv::DMatch& n = match_pair[1];
+                
+                // Lowe's ratio test
+                if (m.distance < match_ratio_threshold_ * n.distance) {
+                    good_matches.push_back(m);
+                }
+            }
+        }
+        
+        return good_matches;
+    }
+
+    void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
+    {
+        // Convert image
+        cv::Mat curr_image;
+        try {
+            curr_image = cv_bridge::toCvShare(msg, "bgr8")->image;
+        } catch (cv_bridge::Exception &e) {
+            RCLCPP_ERROR(this->get_logger(), "cv_bridge error: %s", e.what());
+            return;
+        }
+
+        // Grayscale conversion
+        cv::Mat gray;
+        cv::cvtColor(curr_image, gray, cv::COLOR_BGR2GRAY);
+
+        // Apply Gaussian blur to reduce noise
+        cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.0);
+
+        // Calculate fixed center ROI
+        cv::Rect curr_roi = calculateFixedCenterROI(gray);
+        cv::Mat roi_mask = createROIMask(gray, curr_roi);
+
+        // Feature detection using ORB within ROI
+        std::vector<cv::KeyPoint> curr_keypoints;
+        cv::Mat curr_descriptors;
+        detector_->detectAndCompute(gray, roi_mask, curr_keypoints, curr_descriptors);
+
+        if (!has_prev_frame_) {
+            prev_image_ = gray.clone();
+            prev_keypoints_ = curr_keypoints;
+            prev_descriptors_ = curr_descriptors.clone();
+            prev_roi_ = curr_roi;
+            has_prev_frame_ = true;
+            
+            // Publish debug image for first frame
+            publishDebugVisualization(curr_image, curr_keypoints, {}, {}, {}, 0, curr_roi, msg->header);
+            return;
+        }
+
+        // Skip if insufficient features
+        if (prev_descriptors_.empty() || curr_descriptors.empty() || 
+            prev_keypoints_.size() < min_matches_ || curr_keypoints.size() < min_matches_) {
+            RCLCPP_WARN(this->get_logger(), "Insufficient features detected in ROI");
+            updatePreviousFrame(gray, curr_keypoints, curr_descriptors, curr_roi);
+            publishDebugVisualization(curr_image, curr_keypoints, {}, {}, {}, 0, curr_roi, msg->header);
+            return;
+        }
+
+        // Feature matching with kNN and ratio test
+        std::vector<std::vector<cv::DMatch>> knn_matches;
+        matcher_->knnMatch(prev_descriptors_, curr_descriptors, knn_matches, 2);
+        
+        // Apply ratio test
+        std::vector<cv::DMatch> good_matches = filterMatchesWithRatioTest(knn_matches);
+
+        if (good_matches.size() < static_cast<size_t>(min_matches_)) {
+            RCLCPP_WARN(this->get_logger(), "Insufficient good matches in ROI: %zu", good_matches.size());
+            updatePreviousFrame(gray, curr_keypoints, curr_descriptors, curr_roi);
+            publishDebugVisualization(curr_image, curr_keypoints, good_matches, {}, {}, 0, curr_roi, msg->header);
+            return;
+        }
+
+        // Extract matched points and calculate size ratios
+        std::vector<cv::Point2f> prev_pts, curr_pts;
+        std::vector<double> size_ratios;
+        
+        for (const auto &match : good_matches) {
+            const auto &prev_kp = prev_keypoints_[match.queryIdx];
+            const auto &curr_kp = curr_keypoints[match.trainIdx];
+            
+            // Only consider points that are expanding (getting larger)
+            double size_ratio = curr_kp.size / (prev_kp.size + 1e-6);
+            if (size_ratio > 1.0) {
+                prev_pts.push_back(prev_kp.pt);
+                curr_pts.push_back(curr_kp.pt);
+                size_ratios.push_back(size_ratio);
+            }
+        }
+
+        int obstacle_state = 0;
+        std::vector<cv::Point2f> hull1, hull2;
+
+        if (prev_pts.size() >= 4) { // Need at least 4 points for meaningful hull
+            // Calculate convex hulls
+            cv::convexHull(prev_pts, hull1);
+            cv::convexHull(curr_pts, hull2);
+
+            double area1 = cv::contourArea(hull1);
+            double area2 = cv::contourArea(hull2);
+
+            // Calculate average keypoint size ratio
+            double avg_kp_ratio = 0.0;
+            for (double ratio : size_ratios) {
+                avg_kp_ratio += ratio;
+            }
+            avg_kp_ratio /= size_ratios.size();
+
+            double area_ratio = area2 / (area1 + 1e-6);
+
+            RCLCPP_INFO(this->get_logger(), 
+                "Center ROI: %dx%d, Expanding points: %zu, Avg KP ratio: %.2f, Area ratio: %.2f", 
+                curr_roi.width, curr_roi.height, prev_pts.size(), avg_kp_ratio, area_ratio);
+            
+            // Obstacle detection logic (Al-Kaff paper approach)
+            if (avg_kp_ratio >= kp_ratio_threshold_ && 
+                area_ratio >= area_ratio_threshold_ && 
+                prev_pts.size() >= static_cast<size_t>(min_matches_)) {
+                obstacle_state = 1;
+                RCLCPP_WARN(this->get_logger(), "OBSTACLE DETECTED in center ROI!");
+            }
+        }
+
+        // Publish detection result
+        std_msgs::msg::Int32 state_msg;
+        state_msg.data = obstacle_state;
+        detection_pub_->publish(state_msg);
+
+        // Create and publish debug visualization
+        publishDebugVisualization(curr_image, curr_keypoints, good_matches, hull1, hull2, 
+                                obstacle_state, curr_roi, msg->header);
+
+        // Update previous frame
+        updatePreviousFrame(gray, curr_keypoints, curr_descriptors, curr_roi);
+    }
+
+    void updatePreviousFrame(const cv::Mat& gray, const std::vector<cv::KeyPoint>& keypoints, 
+                           const cv::Mat& descriptors, const cv::Rect& roi)
+    {
+        prev_image_ = gray.clone();
+        prev_keypoints_ = keypoints;
+        prev_descriptors_ = descriptors.clone();
+        prev_roi_ = roi;
+    }
+
+    void publishDebugVisualization(const cv::Mat& curr_image, 
+                                 const std::vector<cv::KeyPoint>& curr_keypoints,
+                                 const std::vector<cv::DMatch>& matches,
+                                 const std::vector<cv::Point2f>& hull1,
+                                 const std::vector<cv::Point2f>& hull2,
+                                 int obstacle_state,
+                                 const cv::Rect& roi,
+                                 const std_msgs::msg::Header& header)
+    {
+        cv::Mat debug_img = curr_image.clone();
+        
+        // Draw ROI boundary
+        cv::rectangle(debug_img, roi, cv::Scalar(255, 255, 0), 2); // Cyan ROI boundary
+        
+        // Draw keypoints (only those in ROI)
+        cv::drawKeypoints(debug_img, curr_keypoints, debug_img, cv::Scalar(0, 255, 0), 
+                         cv::DrawMatchesFlags::DEFAULT);
+
+        // Draw convex hulls
+        if (!hull1.empty()) {
+            std::vector<std::vector<cv::Point>> hull_draw1 = {std::vector<cv::Point>(hull1.begin(), hull1.end())};
+            cv::polylines(debug_img, hull_draw1, true, cv::Scalar(255, 0, 0), 2); // Blue for previous
+        }
+
+        if (!hull2.empty()) {
+            std::vector<std::vector<cv::Point>> hull_draw2 = {std::vector<cv::Point>(hull2.begin(), hull2.end())};
+            cv::polylines(debug_img, hull_draw2, true, cv::Scalar(0, 0, 255), 2); // Red for current
+        }
+
+        // Add status text
+        std::string status_text = obstacle_state ? "OBSTACLE DETECTED" : "CLEAR";
+        cv::Scalar text_color = obstacle_state ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 255, 0);
+        cv::putText(debug_img, status_text, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, text_color, 2);
+        
+        // Add ROI info
+        cv::putText(debug_img, "Center ROI: " + std::to_string(roi.width) + "x" + std::to_string(roi.height), 
+                   cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
+        cv::putText(debug_img, "Matches: " + std::to_string(matches.size()), 
+                   cv::Point(10, 80), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
+        cv::putText(debug_img, "Keypoints: " + std::to_string(curr_keypoints.size()), 
+                   cv::Point(10, 100), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
+
+        // Publish debug image
+        auto debug_msg = cv_bridge::CvImage(header, "bgr8", debug_img).toImageMsg();
+        debug_image_pub_->publish(*debug_msg);
+    }
 };
 
-/**
- * @brief Send a command to Arm the vehicle
- */
-void OffboardControl::arm()
+int main(int argc, char **argv)
 {
-	publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0);
-
-	RCLCPP_INFO(this->get_logger(), "Arm command send");
-}
-
-/**
- * @brief Send a command to Disarm the vehicle
- */
-void OffboardControl::disarm()
-{
-	publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 0.0);
-
-	RCLCPP_INFO(this->get_logger(), "Disarm command send");
-}
-
-/**
- * @brief Publish the offboard control mode.
- *        For this example, only position and altitude controls are active.
- */
-void OffboardControl::publish_offboard_control_mode()
-{
-	OffboardControlMode msg{};
-	msg.position = true;
-	msg.velocity = false;
-	msg.acceleration = false;
-	msg.attitude = false;
-	msg.body_rate = false;
-	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-	offboard_control_mode_publisher_->publish(msg);
-}
-
-/**
- * @brief Publish a trajectory setpoint
- *        For this example, it sends a trajectory setpoint to make the
- *        vehicle hover at 5 meters with a yaw angle of 180 degrees.
- */
-void OffboardControl::publish_trajectory_setpoint()
-{
-	TrajectorySetpoint msg{};
-	msg.position = {0.0, 0.0, -5.0};
-	msg.yaw = -3.14; // [-PI:PI]
-	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-	trajectory_setpoint_publisher_->publish(msg);
-}
-
-/**
- * @brief Publish vehicle commands
- * @param command   Command code (matches VehicleCommand and MAVLink MAV_CMD codes)
- * @param param1    Command parameter 1
- * @param param2    Command parameter 2
- */
-void OffboardControl::publish_vehicle_command(uint16_t command, float param1, float param2)
-{
-	VehicleCommand msg{};
-	msg.param1 = param1;
-	msg.param2 = param2;
-	msg.command = command;
-	msg.target_system = 1;
-	msg.target_component = 1;
-	msg.source_system = 1;
-	msg.source_component = 1;
-	msg.from_external = true;
-	msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-	vehicle_command_publisher_->publish(msg);
-}
-
-int main(int argc, char *argv[])
-{
-	std::cout << "Starting offboard control node..." << std::endl;
-	setvbuf(stdout, NULL, _IONBF, BUFSIZ);
-	rclcpp::init(argc, argv);
-	rclcpp::spin(std::make_shared<OffboardControl>());
-
-	rclcpp::shutdown();
-	return 0;
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<ROIObstacleDetectorNode>());
+    rclcpp::shutdown();
+    return 0;
 }

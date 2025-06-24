@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <deque>
+#include <algorithm>
 
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
@@ -56,7 +57,7 @@ private:
     float current_yaw_ = 0.0f;
     float initial_x_ = 0.0f, initial_y_ = 0.0f, initial_z_ = 0.0f;
     float velocity_ = 3.0f;
-    float step_ = 0.3f;
+    float step_ = 0.3f; // velocity
     float waypoint_hold_time_ = 5.0f;
 
     struct Waypoint { float x, y, z; };
@@ -69,11 +70,14 @@ private:
     {
         aruco_detected_ = !msg->poses.empty();
         if (aruco_detected_) aruco_pose_ = msg->poses[0];
+
         aruco_history_.push_back(aruco_detected_);
         if (aruco_history_.size() > required_aruco_detections_)
             aruco_history_.pop_front();
 
-        aruco_consistent_ = std::count(aruco_history_.begin(), aruco_history_.end(), true) >= required_aruco_detections_;
+        aruco_consistent_ = static_cast<size_t>(
+            std::count(aruco_history_.begin(), aruco_history_.end(), true)
+        ) >= required_aruco_detections_;
     }
 
     void odom_callback(const VehicleOdometry::SharedPtr msg)
@@ -81,6 +85,7 @@ private:
         current_x_ = msg->position[0];
         current_y_ = msg->position[1];
         current_z_ = msg->position[2];
+
         float q0 = msg->q[0], q1 = msg->q[1], q2 = msg->q[2], q3 = msg->q[3];
         current_yaw_ = std::atan2(2.0f * (q0 * q3 + q1 * q2),
                                   1.0f - 2.0f * (q2 * q2 + q3 * q3));
@@ -89,15 +94,22 @@ private:
             initial_x_ = current_x_;
             initial_y_ = current_y_;
             initial_z_ = current_z_;
-            waypoints_ = {
-                {initial_x_,       initial_y_,       initial_z_ - 3.0f}, // Takeoff
-                {initial_x_ + 3.0, initial_y_,       initial_z_ - 3.0f},
-                {initial_x_ + 3.0, initial_y_ + 3.0, initial_z_ - 3.0f},
-                {initial_x_,       initial_y_ + 3.0, initial_z_ - 3.0f},
-                {initial_x_,       initial_y_,       initial_z_ - 3.0f}  // Return to start
+
+            std::vector<Waypoint> body_waypoints = {
+                {0.0f, 0.0f, -3.0f},
+                {3.0f, 0.0f, -3.0f},
+                {0.0f, 0.0f, -3.0f}
             };
+
+            for (const auto& bp : body_waypoints) {
+                float ned_x = initial_x_ + bp.x * std::cos(current_yaw_) - bp.y * std::sin(current_yaw_);
+                float ned_y = initial_y_ + bp.x * std::sin(current_yaw_) + bp.y * std::cos(current_yaw_);
+                float ned_z = initial_z_ + bp.z;
+                waypoints_.push_back({ned_x, ned_y, ned_z});
+            }
+
             initialized_ = true;
-            RCLCPP_INFO(this->get_logger(), "Initialized at x=%.2f y=%.2f z=%.2f", initial_x_, initial_y_, initial_z_);
+            RCLCPP_INFO(this->get_logger(), "Initialized at x=%.2f y=%.2f z=%.2f yaw=%.2f", initial_x_, initial_y_, initial_z_, current_yaw_);
         }
     }
 
@@ -119,25 +131,32 @@ private:
 
         if (!initialized_ || landing_) return;
 
-        // ArUco detected consistently → go into slow correction mode
         if (aruco_consistent_) {
             float dx = aruco_pose_.position.x;
             float dy = aruco_pose_.position.y;
-            if (std::abs(dx) < 0.05 && std::abs(dy) < 0.05) {
+
+            RCLCPP_INFO(this->get_logger(), "[ArUco] Pose in camera frame: dx=%.3f, dy=%.3f", dx, dy);
+
+            float body_x = std::clamp(-dy, -0.15f, 0.15f);  // forward
+            float body_y = std::clamp(dx, -0.15f, 0.15f);  // right
+            
+            float adjust_x = current_x_ + body_x * std::cos(current_yaw_) - body_y * std::sin(current_yaw_);
+            float adjust_y = current_y_ + body_x * std::sin(current_yaw_) + body_y * std::cos(current_yaw_);
+
+
+            RCLCPP_INFO(this->get_logger(), "[Adjustments] Moving to x=%.3f, y=%.3f", adjust_x, adjust_y);
+
+            if (std::abs(dx) < 0.05f && std::abs(dy) < 0.05f) {
                 RCLCPP_INFO(this->get_logger(), "ArUco centered. Landing...");
                 land();
                 landing_ = true;
                 return;
             } else {
-                float adjust_x = current_x_ + std::clamp(dx, -0.15f, 0.15f);
-                float adjust_y = current_y_ + std::clamp(dy, -0.15f, 0.15f);
                 publish_trajectory_setpoint(adjust_x, adjust_y, waypoints_[0].z, current_yaw_);
-                RCLCPP_INFO(this->get_logger(), "Correcting to ArUco x=%.2f y=%.2f", dx, dy);
                 return;
             }
         }
 
-        // No ArUco: follow path
         if (current_wp_index_ >= waypoints_.size()) {
             RCLCPP_INFO(this->get_logger(), "Path done. No ArUco. Landing...");
             land();
