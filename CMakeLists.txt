@@ -28,6 +28,7 @@ find_package(rclpy REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2 REQUIRED)  
 
 #################
 # Setup targets #
@@ -77,7 +78,7 @@ install(TARGETS offboard_control_srv DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/coba_coba
 add_executable(coba_coba src/examples/offboard/coba_coba.cpp)
-ament_target_dependencies(coba_coba rclcpp px4_msgs geometry_msgs)
+ament_target_dependencies(coba_coba rclcpp px4_msgs geometry_msgs tf2)
 install(TARGETS coba_coba DESTINATION lib/${PROJECT_NAME})
 
 
