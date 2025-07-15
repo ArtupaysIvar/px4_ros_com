@@ -28,6 +28,8 @@ find_package(rclpy REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2 REQUIRED)  
+find_package(nav_msgs REQUIRED)
 
 #################
 # Setup targets #
@@ -71,7 +73,7 @@ install(TARGETS offboard_control1 DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/offboard_control_srv
 add_executable(offboard_control_srv src/examples/offboard/offboard_control_srv.cpp)
-ament_target_dependencies(offboard_control_srv rclcpp px4_msgs std_msgs sensor_msgs cv_bridge)
+ament_target_dependencies(offboard_control_srv rclcpp px4_msgs std_msgs sensor_msgs cv_bridge OpenCV geometry_msgs)
 target_link_libraries(offboard_control_srv ${OpenCV_LIBS}) 
 install(TARGETS offboard_control_srv DESTINATION lib/${PROJECT_NAME})
 
@@ -79,6 +81,16 @@ install(TARGETS offboard_control_srv DESTINATION lib/${PROJECT_NAME})
 add_executable(coba_coba src/examples/offboard/coba_coba.cpp)
 ament_target_dependencies(coba_coba rclcpp px4_msgs geometry_msgs)
 install(TARGETS coba_coba DESTINATION lib/${PROJECT_NAME})
+
+# examples/offboard/benja
+add_executable(benja src/examples/offboard/benja.cpp)
+ament_target_dependencies(benja rclcpp px4_msgs geometry_msgs)
+install(TARGETS benja DESTINATION lib/${PROJECT_NAME})
+
+# examples/offboard/3d_vis
+add_executable(3d_vis src/examples/offboard/3d_vis.cpp)
+ament_target_dependencies(3d_vis rclcpp px4_msgs geometry_msgs tf2 nav_msgs)
+install(TARGETS 3d_vis DESTINATION lib/${PROJECT_NAME})
 
 
 ############

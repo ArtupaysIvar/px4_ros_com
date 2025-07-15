@@ -1,296 +1,247 @@
 #include <rclcpp/rclcpp.hpp>
-#include <std_msgs/msg/int32.hpp>
-#include <sensor_msgs/msg/image.hpp>
-#include <cv_bridge/cv_bridge.h>
-#include <opencv2/opencv.hpp>
-#include <opencv2/features2d.hpp>
-#include <deque>
-#include <vector>
+#include <px4_msgs/msg/offboard_control_mode.hpp>
+#include <px4_msgs/msg/trajectory_setpoint.hpp>
+#include <px4_msgs/msg/vehicle_command.hpp>
+#include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 
-class ROIObstacleDetectorNode : public rclcpp::Node
+#include <chrono>
+#include <cmath>
+#include <deque>
+#include <algorithm>
+
+using namespace std::chrono_literals;
+using namespace px4_msgs::msg;
+
+class ArucoWaypointLandingNode : public rclcpp::Node
 {
 public:
-    ROIObstacleDetectorNode()
-    : Node("roi_obstacle_detector_node")
+    ArucoWaypointLandingNode() : Node("aruco_waypoint_landing_node")
     {
-        image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-            "/image_raw", rclcpp::SensorDataQoS(),
-            std::bind(&ROIObstacleDetectorNode::imageCallback, this, std::placeholders::_1));
+        offboard_control_mode_pub_ = this->create_publisher<OffboardControlMode>("/fmu/in/offboard_control_mode", 10);
+        trajectory_setpoint_pub_ = this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
+        vehicle_command_pub_ = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
 
-        detection_pub_ = this->create_publisher<std_msgs::msg::Int32>("/obstacle_detected", 10);
-        debug_image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/debug/image_roi_orb", 10);
+        aruco_sub_ = this->create_subscription<geometry_msgs::msg::PoseArray>(
+            "/aruco_visualization", 10, std::bind(&ArucoWaypointLandingNode::aruco_callback, this, std::placeholders::_1));
+        odom_sub_ = this->create_subscription<VehicleOdometry>(
+            "/fmu/out/vehicle_odometry", rclcpp::QoS(10).best_effort(),
+            std::bind(&ArucoWaypointLandingNode::odom_callback, this, std::placeholders::_1));
 
-        // Use ORB for better performance and reliability
-        detector_ = cv::ORB::create(800);  // Reduced since we're using ROI
-        matcher_ = cv::BFMatcher::create(cv::NORM_HAMMING, false); // Use kNN matching
+        timer_ = this->create_wall_timer(100ms, std::bind(&ArucoWaypointLandingNode::control_loop, this));
 
-        // Initialize parameters (tunable)
-        kp_ratio_threshold_ = 1.15;
-        area_ratio_threshold_ = 1.3;
-        min_matches_ = 8; // Reduced for ROI
-        match_ratio_threshold_ = 0.75; // For Lowe's ratio test
-        
-        // Fixed center ROI parameters (following Al-Kaff paper approach)
-        roi_margin_x_ = 0.25; // 25% margin from sides (center 50% width)
-        roi_margin_y_ = 0.25; // 25% margin from top/bottom (center 50% height)
-
-        RCLCPP_INFO(this->get_logger(), "Fixed center ROI obstacle detector initialized.");
+        RCLCPP_INFO(this->get_logger(), "Aruco Waypoint Landing Node started.");
     }
 
 private:
-    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
-    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr detection_pub_;
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr debug_image_pub_;
+    rclcpp::Publisher<OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
+    rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
+    rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_pub_;
+    rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr aruco_sub_;
+    rclcpp::Subscription<VehicleOdometry>::SharedPtr odom_sub_;
+    rclcpp::TimerBase::SharedPtr timer_;
 
-    cv::Mat prev_image_;
-    std::vector<cv::KeyPoint> prev_keypoints_;
-    cv::Mat prev_descriptors_;
-    cv::Rect prev_roi_;
-    bool has_prev_frame_ = false;
+    geometry_msgs::msg::Pose aruco_pose_;
+    std::deque<bool> aruco_history_;
+    const size_t required_aruco_detections_ = 5;
 
-    cv::Ptr<cv::ORB> detector_;
-    cv::Ptr<cv::BFMatcher> matcher_;
+    bool aruco_detected_ = false;
+    bool aruco_consistent_ = false;
+    bool aruco_centered_ = false;
+    bool armed_ = false;
+    bool offboard_enabled_ = false;
+    bool initialized_ = false;
+    bool landing_ = false;
 
-    // Tunable parameters
-    double kp_ratio_threshold_;
-    double area_ratio_threshold_;
-    int min_matches_;
-    double match_ratio_threshold_;
-    
-    // ROI parameters (fixed center approach)
-    double roi_margin_x_;
-    double roi_margin_y_;
+    float current_x_ = 0.0f, current_y_ = 0.0f, current_z_ = 0.0f;
+    float current_yaw_ = 0.0f;
+    float initial_x_ = 0.0f, initial_y_ = 0.0f, initial_z_ = 0.0f;
+    //float velocity_ = 3.0f;
+    float step_ = 0.3f; // velocity
+    float waypoint_hold_time_ = 5.0f;
 
-    cv::Rect calculateFixedCenterROI(const cv::Mat& image)
+    struct Waypoint { float x, y, z; };
+    std::vector<Waypoint> waypoints_;
+    size_t current_wp_index_ = 0;
+    rclcpp::Time wp_reached_time_;
+    bool holding_wp_ = false;
+
+    void aruco_callback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
     {
-        int img_width = image.cols;
-        int img_height = image.rows;
-        
-        // Fixed center ROI following Al-Kaff paper approach
-        // Focus on center region where obstacles are most critical for UAV navigation
-        int margin_x = static_cast<int>(img_width * roi_margin_x_);
-        int margin_y = static_cast<int>(img_height * roi_margin_y_);
-        
-        int roi_x = margin_x;
-        int roi_y = margin_y;
-        int roi_width = img_width - 2 * margin_x;
-        int roi_height = img_height - 2 * margin_y;
-        
-        return cv::Rect(roi_x, roi_y, roi_width, roi_height);
+        aruco_detected_ = !msg->poses.empty();
+        if (aruco_detected_) aruco_pose_ = msg->poses[0];
+
+        aruco_history_.push_back(aruco_detected_);
+        if (aruco_history_.size() > required_aruco_detections_)
+            aruco_history_.pop_front();
+
+        aruco_consistent_ = static_cast<size_t>(
+            std::count(aruco_history_.begin(), aruco_history_.end(), true)
+        ) >= required_aruco_detections_;
     }
 
-    cv::Mat createROIMask(const cv::Mat& image, const cv::Rect& roi)
+    void odom_callback(const VehicleOdometry::SharedPtr msg)
     {
-        cv::Mat mask = cv::Mat::zeros(image.size(), CV_8UC1);
-        mask(roi) = 255;
-        return mask;
-    }
+        current_x_ = msg->position[0];
+        current_y_ = msg->position[1];
+        current_z_ = msg->position[2];
 
-    std::vector<cv::DMatch> filterMatchesWithRatioTest(const std::vector<std::vector<cv::DMatch>>& knn_matches)
-    {
-        std::vector<cv::DMatch> good_matches;
-        
-        for (const auto& match_pair : knn_matches) {
-            if (match_pair.size() == 2) {
-                const cv::DMatch& m = match_pair[0];
-                const cv::DMatch& n = match_pair[1];
-                
-                // Lowe's ratio test
-                if (m.distance < match_ratio_threshold_ * n.distance) {
-                    good_matches.push_back(m);
-                }
+        float q0 = msg->q[0], q1 = msg->q[1], q2 = msg->q[2], q3 = msg->q[3];
+        current_yaw_ = std::atan2(2.0f * (q0 * q3 + q1 * q2),
+                                  1.0f - 2.0f * (q2 * q2 + q3 * q3));
+
+        if (!initialized_) {
+            initial_x_ = current_x_;
+            initial_y_ = current_y_;
+            initial_z_ = current_z_;
+
+            std::vector<Waypoint> body_waypoints = {
+                {0.0f, 0.0f, -1.0f},
+                {3.0f, 0.0f, -1.0f},
+                {0.0f, 0.0f, -1.0f}
+            };
+
+            for (const auto& bp : body_waypoints) {
+                float ned_x = initial_x_ + bp.x * std::cos(current_yaw_) - bp.y * std::sin(current_yaw_);
+                float ned_y = initial_y_ + bp.x * std::sin(current_yaw_) + bp.y * std::cos(current_yaw_);
+                float ned_z = initial_z_ + bp.z;
+                waypoints_.push_back({ned_x, ned_y, ned_z});
             }
+
+            initialized_ = true;
+            RCLCPP_INFO(this->get_logger(), "Initialized at x=%.2f y=%.2f z=%.2f yaw=%.2f", initial_x_, initial_y_, initial_z_, current_yaw_);
         }
-        
-        return good_matches;
     }
 
-    void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
+    void control_loop()
     {
-        // Convert image
-        cv::Mat curr_image;
-        try {
-            curr_image = cv_bridge::toCvShare(msg, "bgr8")->image;
-        } catch (cv_bridge::Exception &e) {
-            RCLCPP_ERROR(this->get_logger(), "cv_bridge error: %s", e.what());
+        publish_offboard_control_mode();
+
+        if (!offboard_enabled_) {
+            for (int i = 0; i < 10; ++i) publish_offboard_control_mode();
+            publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 6);
+            offboard_enabled_ = true;
+        }
+
+        if (!armed_) {
+            arm();
+            armed_ = true;
             return;
         }
 
-        // Grayscale conversion
-        cv::Mat gray;
-        cv::cvtColor(curr_image, gray, cv::COLOR_BGR2GRAY);
+        if (!initialized_ || landing_) return;
 
-        // Apply Gaussian blur to reduce noise
-        cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.0);
+        if (aruco_consistent_) {
+            float dx = aruco_pose_.position.x;
+            float dy = aruco_pose_.position.y;
 
-        // Calculate fixed center ROI
-        cv::Rect curr_roi = calculateFixedCenterROI(gray);
-        cv::Mat roi_mask = createROIMask(gray, curr_roi);
+            RCLCPP_INFO(this->get_logger(), "[ArUco] Pose in camera frame: dx=%.3f, dy=%.3f", dx, dy);
 
-        // Feature detection using ORB within ROI
-        std::vector<cv::KeyPoint> curr_keypoints;
-        cv::Mat curr_descriptors;
-        detector_->detectAndCompute(gray, roi_mask, curr_keypoints, curr_descriptors);
-
-        if (!has_prev_frame_) {
-            prev_image_ = gray.clone();
-            prev_keypoints_ = curr_keypoints;
-            prev_descriptors_ = curr_descriptors.clone();
-            prev_roi_ = curr_roi;
-            has_prev_frame_ = true;
+            float body_x = std::clamp(-dy, -0.15f, 0.15f);  // forward
+            float body_y = std::clamp(dx, -0.15f, 0.15f);  // right
             
-            // Publish debug image for first frame
-            publishDebugVisualization(curr_image, curr_keypoints, {}, {}, {}, 0, curr_roi, msg->header);
-            return;
-        }
+            float adjust_x = current_x_ + body_x * std::cos(current_yaw_) - body_y * std::sin(current_yaw_);
+            float adjust_y = current_y_ + body_x * std::sin(current_yaw_) + body_y * std::cos(current_yaw_);
 
-        // Skip if insufficient features
-        if (prev_descriptors_.empty() || curr_descriptors.empty() || 
-            prev_keypoints_.size() < min_matches_ || curr_keypoints.size() < min_matches_) {
-            RCLCPP_WARN(this->get_logger(), "Insufficient features detected in ROI");
-            updatePreviousFrame(gray, curr_keypoints, curr_descriptors, curr_roi);
-            publishDebugVisualization(curr_image, curr_keypoints, {}, {}, {}, 0, curr_roi, msg->header);
-            return;
-        }
 
-        // Feature matching with kNN and ratio test
-        std::vector<std::vector<cv::DMatch>> knn_matches;
-        matcher_->knnMatch(prev_descriptors_, curr_descriptors, knn_matches, 2);
-        
-        // Apply ratio test
-        std::vector<cv::DMatch> good_matches = filterMatchesWithRatioTest(knn_matches);
+            RCLCPP_INFO(this->get_logger(), "[Adjustments] Moving to x=%.3f, y=%.3f", adjust_x, adjust_y);
 
-        if (good_matches.size() < static_cast<size_t>(min_matches_)) {
-            RCLCPP_WARN(this->get_logger(), "Insufficient good matches in ROI: %zu", good_matches.size());
-            updatePreviousFrame(gray, curr_keypoints, curr_descriptors, curr_roi);
-            publishDebugVisualization(curr_image, curr_keypoints, good_matches, {}, {}, 0, curr_roi, msg->header);
-            return;
-        }
-
-        // Extract matched points and calculate size ratios
-        std::vector<cv::Point2f> prev_pts, curr_pts;
-        std::vector<double> size_ratios;
-        
-        for (const auto &match : good_matches) {
-            const auto &prev_kp = prev_keypoints_[match.queryIdx];
-            const auto &curr_kp = curr_keypoints[match.trainIdx];
-            
-            // Only consider points that are expanding (getting larger)
-            double size_ratio = curr_kp.size / (prev_kp.size + 1e-6);
-            if (size_ratio > 1.0) {
-                prev_pts.push_back(prev_kp.pt);
-                curr_pts.push_back(curr_kp.pt);
-                size_ratios.push_back(size_ratio);
+            if (std::abs(dx) < 0.05f && std::abs(dy) < 0.05f) {
+                RCLCPP_INFO(this->get_logger(), "ArUco centered. Landing...");
+                land();
+                landing_ = true;
+                return;
+            } else {
+                publish_trajectory_setpoint(adjust_x, adjust_y, waypoints_[0].z, current_yaw_);
+                return;
             }
         }
 
-        int obstacle_state = 0;
-        std::vector<cv::Point2f> hull1, hull2;
-
-        if (prev_pts.size() >= 4) { // Need at least 4 points for meaningful hull
-            // Calculate convex hulls
-            cv::convexHull(prev_pts, hull1);
-            cv::convexHull(curr_pts, hull2);
-
-            double area1 = cv::contourArea(hull1);
-            double area2 = cv::contourArea(hull2);
-
-            // Calculate average keypoint size ratio
-            double avg_kp_ratio = 0.0;
-            for (double ratio : size_ratios) {
-                avg_kp_ratio += ratio;
-            }
-            avg_kp_ratio /= size_ratios.size();
-
-            double area_ratio = area2 / (area1 + 1e-6);
-
-            RCLCPP_INFO(this->get_logger(), 
-                "Center ROI: %dx%d, Expanding points: %zu, Avg KP ratio: %.2f, Area ratio: %.2f", 
-                curr_roi.width, curr_roi.height, prev_pts.size(), avg_kp_ratio, area_ratio);
-            
-            // Obstacle detection logic (Al-Kaff paper approach)
-            if (avg_kp_ratio >= kp_ratio_threshold_ && 
-                area_ratio >= area_ratio_threshold_ && 
-                prev_pts.size() >= static_cast<size_t>(min_matches_)) {
-                obstacle_state = 1;
-                RCLCPP_WARN(this->get_logger(), "OBSTACLE DETECTED in center ROI!");
-            }
+        if (current_wp_index_ >= waypoints_.size()) {
+            RCLCPP_INFO(this->get_logger(), "Path done. No ArUco. Landing...");
+            land();
+            landing_ = true;
+            return;
         }
 
-        // Publish detection result
-        std_msgs::msg::Int32 state_msg;
-        state_msg.data = obstacle_state;
-        detection_pub_->publish(state_msg);
+        Waypoint wp = waypoints_[current_wp_index_];
+        float dx = wp.x - current_x_;
+        float dy = wp.y - current_y_;
+        float dz = wp.z - current_z_;
+        float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-        // Create and publish debug visualization
-        publishDebugVisualization(curr_image, curr_keypoints, good_matches, hull1, hull2, 
-                                obstacle_state, curr_roi, msg->header);
-
-        // Update previous frame
-        updatePreviousFrame(gray, curr_keypoints, curr_descriptors, curr_roi);
+        if (dist < 0.3f) {
+            if (!holding_wp_) {
+                holding_wp_ = true;
+                wp_reached_time_ = this->now();
+                RCLCPP_INFO(this->get_logger(), "Reached waypoint %ld. Holding...", current_wp_index_);
+            }
+            if ((this->now() - wp_reached_time_).seconds() > waypoint_hold_time_) {
+                current_wp_index_++;
+                holding_wp_ = false;
+            }
+            publish_trajectory_setpoint(wp.x, wp.y, wp.z, current_yaw_);
+        } else {
+            float dir_x = dx / dist;
+            float dir_y = dy / dist;
+            float dir_z = dz / dist;
+            publish_trajectory_setpoint(current_x_ + dir_x * step_,
+                                        current_y_ + dir_y * step_,
+                                        current_z_ + dir_z * step_,
+                                        current_yaw_);
+        }
     }
 
-    void updatePreviousFrame(const cv::Mat& gray, const std::vector<cv::KeyPoint>& keypoints, 
-                           const cv::Mat& descriptors, const cv::Rect& roi)
+    void publish_offboard_control_mode()
     {
-        prev_image_ = gray.clone();
-        prev_keypoints_ = keypoints;
-        prev_descriptors_ = descriptors.clone();
-        prev_roi_ = roi;
+        OffboardControlMode msg{};
+        msg.timestamp = now().nanoseconds() / 1000;
+        msg.position = true;
+        offboard_control_mode_pub_->publish(msg);
     }
 
-    void publishDebugVisualization(const cv::Mat& curr_image, 
-                                 const std::vector<cv::KeyPoint>& curr_keypoints,
-                                 const std::vector<cv::DMatch>& matches,
-                                 const std::vector<cv::Point2f>& hull1,
-                                 const std::vector<cv::Point2f>& hull2,
-                                 int obstacle_state,
-                                 const cv::Rect& roi,
-                                 const std_msgs::msg::Header& header)
+    void publish_trajectory_setpoint(float x, float y, float z, float yaw)
     {
-        cv::Mat debug_img = curr_image.clone();
-        
-        // Draw ROI boundary
-        cv::rectangle(debug_img, roi, cv::Scalar(255, 255, 0), 2); // Cyan ROI boundary
-        
-        // Draw keypoints (only those in ROI)
-        cv::drawKeypoints(debug_img, curr_keypoints, debug_img, cv::Scalar(0, 255, 0), 
-                         cv::DrawMatchesFlags::DEFAULT);
+        TrajectorySetpoint msg{};
+        msg.timestamp = now().nanoseconds() / 1000;
+        msg.position = {x, y, z};
+        msg.yaw = yaw;
+        trajectory_setpoint_pub_->publish(msg);
+    }
 
-        // Draw convex hulls
-        if (!hull1.empty()) {
-            std::vector<std::vector<cv::Point>> hull_draw1 = {std::vector<cv::Point>(hull1.begin(), hull1.end())};
-            cv::polylines(debug_img, hull_draw1, true, cv::Scalar(255, 0, 0), 2); // Blue for previous
-        }
+    void publish_vehicle_command(uint16_t command, float param1 = 0.0f, float param2 = 0.0f)
+    {
+        VehicleCommand msg{};
+        msg.timestamp = now().nanoseconds() / 1000;
+        msg.param1 = param1;
+        msg.param2 = param2;
+        msg.command = command;
+        msg.target_system = 1;
+        msg.target_component = 1;
+        msg.source_system = 1;
+        msg.source_component = 1;
+        msg.from_external = true;
+        vehicle_command_pub_->publish(msg);
+    }
 
-        if (!hull2.empty()) {
-            std::vector<std::vector<cv::Point>> hull_draw2 = {std::vector<cv::Point>(hull2.begin(), hull2.end())};
-            cv::polylines(debug_img, hull_draw2, true, cv::Scalar(0, 0, 255), 2); // Red for current
-        }
+    void arm()
+    {
+        publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0f);
+        RCLCPP_INFO(this->get_logger(), "Arming...");
+    }
 
-        // Add status text
-        std::string status_text = obstacle_state ? "OBSTACLE DETECTED" : "CLEAR";
-        cv::Scalar text_color = obstacle_state ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 255, 0);
-        cv::putText(debug_img, status_text, cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, text_color, 2);
-        
-        // Add ROI info
-        cv::putText(debug_img, "Center ROI: " + std::to_string(roi.width) + "x" + std::to_string(roi.height), 
-                   cv::Point(10, 60), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
-        cv::putText(debug_img, "Matches: " + std::to_string(matches.size()), 
-                   cv::Point(10, 80), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
-        cv::putText(debug_img, "Keypoints: " + std::to_string(curr_keypoints.size()), 
-                   cv::Point(10, 100), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
-
-        // Publish debug image
-        auto debug_msg = cv_bridge::CvImage(header, "bgr8", debug_img).toImageMsg();
-        debug_image_pub_->publish(*debug_msg);
+    void land()
+    {
+        publish_vehicle_command(VehicleCommand::VEHICLE_CMD_NAV_LAND);
+        RCLCPP_INFO(this->get_logger(), "Landing...");
     }
 };
 
-int main(int argc, char **argv)
+int main(int argc, char* argv[])
 {
+    std::cout << "Starting ArUco Waypoint Landing Node..." << std::endl;
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<ROIObstacleDetectorNode>());
+    rclcpp::spin(std::make_shared<ArucoWaypointLandingNode>());
     rclcpp::shutdown();
     return 0;
 }

@@ -26,7 +26,8 @@
 
   <depend>cv_bridge</depend>
   <depend>std_msgs</depend>
-
+  <depend>nav_msgs</depend>
+  <depend>tf2</depend>
   <depend>launch</depend>
   <depend>launch_testing</depend>
   <depend>launch_testing_ros</depend>
