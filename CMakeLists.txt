@@ -162,4 +162,8 @@ install(PROGRAMS
   src/examples/offboard_py/tes_manuver3.py
   DESTINATION lib/${PROJECT_NAME}
 )
+install(PROGRAMS
+  src/examples/offboard_py/user_ui.py
+  DESTINATION lib/${PROJECT_NAME}
+)
 ament_package()
