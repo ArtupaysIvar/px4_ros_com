@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 import rclpy
+import networkx as nx
+import math
+import numpy as np
 from rclpy.node import Node
 from geometry_msgs.msg import PoseArray, PoseStamped, Pose
 import matplotlib.pyplot as plt
@@ -37,6 +40,137 @@ class WaypointServer(Node):
         
         self.get_logger().info("Waypoint Server started. Publishing waypoints at 2 Hz on /waypoint_array")
 
+    def reroute_with_christofides(self):
+        original_poses = list(self.pose_array_msg.poses)
+
+        # --- Calculate original path distance ---
+        total_dist_prev = 0.0
+        for i in range(len(original_poses)):
+            p1 = original_poses[i - 1].position if i > 0 else original_poses[-1].position
+            p2 = original_poses[i].position
+            total_dist_prev += math.hypot(p1.x - p2.x, p1.y - p2.y)
+
+        # --- Figure 1: Original Path ---
+        plt.figure("Original Path")
+        plt.clf()
+        self.plot_path(original_poses, 'r--', label='Original Path')
+        plt.legend()
+        plt.title(f"Original Path\nTotal Distance: {total_dist_prev:.2f} m")
+
+        if len(self.pose_array_msg.poses) <= 2:
+            print("Need at least 3 waypoints (incl. HOME) to reroute.")
+            return
+
+        # --- Step 1: Extract points (excluding HOME) ---
+        # points = [(pose.position.x, pose.position.y) for pose in self.pose_array_msg.poses[1:]]
+        points = [(pose.position.x, pose.position.y) for pose in self.pose_array_msg.poses]
+        # --- Step 2: Build complete graph ---
+        G = nx.Graph()
+        for i in range(len(points)):
+            for j in range(i + 1, len(points)):
+                xi, yi = points[i]
+                xj, yj = points[j]
+                dist = math.hypot(xi - xj, yi - yj)
+                G.add_edge(i, j, weight=dist)
+
+        # --- Step 3: MST ---
+        T = nx.minimum_spanning_tree(G)
+
+        # --- Step 4: Find odd nodes ---
+        odd_nodes = [v for v in T.nodes if T.degree(v) % 2 == 1]
+
+        # --- Step 5: Greedy matching ---
+        M = nx.Graph()
+        matched = set()
+        for u in odd_nodes:
+            if u in matched:
+                continue
+            min_w = float('inf')
+            best_v = None
+            for v in odd_nodes:
+                if v != u and v not in matched:
+                    w = G[u][v]['weight']
+                    if w < min_w:
+                        min_w = w
+                        best_v = v
+            if best_v is not None:
+                M.add_edge(u, best_v, weight=min_w)
+                matched.add(u)
+                matched.add(best_v)
+
+        # --- Step 6: Combine MST + Matching ---
+        multi = nx.MultiGraph()
+        multi.add_edges_from(T.edges(data=True))
+        multi.add_edges_from(M.edges(data=True))
+
+        # --- Step 7: Eulerian tour ---
+        circuit = list(nx.eulerian_circuit(multi))
+
+        # --- Step 8: Shortcut to Hamiltonian ---
+        visited = set()
+        tsp_order = []
+        for u, _ in circuit:
+            if u not in visited:
+                visited.add(u)
+                tsp_order.append(u)
+        tsp_order.append(tsp_order[0])
+
+        # --- Step 9: Reorder poses ---
+        ordered_poses = [self.pose_array_msg.poses[i] for i in tsp_order]
+        #ordered_poses = [self.pose_array_msg.poses[0]] + [self.pose_array_msg.poses[1:][i] for i in tsp_order]
+        self.pose_array_msg.poses = ordered_poses
+
+        # --- Step 10: Calculate rerouted distance ---
+        total_dist_new = 0.0
+        for i in range(len(self.pose_array_msg.poses)):
+            p1 = self.pose_array_msg.poses[i - 1].position if i > 0 else self.pose_array_msg.poses[-1].position
+            p2 = self.pose_array_msg.poses[i].position
+            total_dist_new += math.hypot(p1.x - p2.x, p1.y - p2.y)
+
+        # --- Figure 2: Rerouted Path ---
+        plt.figure("Rerouted Path")
+        plt.clf()
+        self.plot_path(self.pose_array_msg.poses, 'b-', label='Rerouted Path')
+        plt.legend()
+        plt.title(f"Rerouted Path (Christofides)\nTotal Distance: {total_dist_new:.2f} m")
+
+        # --- Show all figures ---
+        plt.show()
+
+        # --- Console output ---
+        print(f"Waypoints rerouted using Christofides TSP!")
+        print(f"Previous path total length: {total_dist_prev:.2f} meters")
+        print(f"Rerouted TSP path total length: {total_dist_new:.2f} meters")
+        for i, pose in enumerate(self.pose_array_msg.poses):
+            print(f"Waypoint {i+1}: ({pose.position.x:.2f}, {pose.position.y:.2f}, {pose.position.z:.2f})")
+
+    def plot_path(self, poses, style, label, initial_pos=(0, 0)):
+        # Extract coordinates
+        xs = [p.position.x for p in poses]
+        ys = [p.position.y for p in poses]
+
+        # Ensure path returns to initial position
+        if (xs[-1], ys[-1]) != initial_pos:
+            xs.append(initial_pos[0])
+            ys.append(initial_pos[1])
+
+        # Plot the path
+        # plt.plot(xs, ys, style, label=label)
+        plt.plot(ys, xs, style, label=label)
+
+
+        # Mark waypoints
+        '''
+        for idx, (x, y) in enumerate(zip(xs, ys)):
+            plt.scatter(x, y, c='black', s=20, zorder=5)  # waypoint dot
+            plt.text(x + 0.05, y + 0.05, str(idx), fontsize=9, color='black')
+        ''' 
+        for idx, (x, y) in enumerate(zip(xs, ys)):
+            plt.scatter(y, x, c='black', s=20, zorder=5)  # waypoint dot
+            plt.text(y + 0.05, x + 0.05, str(idx), fontsize=9, color='black')
+        plt.axis('equal')
+
+        
     def publish_waypoints(self):
         """Continuously publish current waypoint plan at 2 Hz"""
         self.pose_array_msg.header.stamp = self.get_clock().now().to_msg()
@@ -114,10 +248,12 @@ class WaypointServer(Node):
             plt.draw()
             print("Cleared all waypoints except initial hover point")
 
-            
         elif event.key == 'd':
             self.start_pub.publish(Empty())
             print("Mission start signal sent on /start_mission!")
+
+        elif event.key == 'r':
+            self.reroute_with_christofides()
 
 
 def main():
@@ -125,7 +261,7 @@ def main():
     server = WaypointServer()
     
     fig, ax = plt.subplots(figsize=(10, 8))
-    ax.set_title("Waypoint Server | Click=add waypoint | z=undo | c=clear | d=start")
+    ax.set_title("Waypoint Server | r=reroute | z=undo | c=clear | d=start")
     #ax.set_xlabel("X [m]")
     #ax.set_ylabel("Y [m]")
     ax.set_xlabel("Y [m]")
