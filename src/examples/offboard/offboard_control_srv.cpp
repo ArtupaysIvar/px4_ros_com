@@ -335,7 +335,7 @@ int main(int argc, char *argv[])
 */
 
 //GPT
-/*
+
 // offboard_distance_step.cpp
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
@@ -620,4 +620,3 @@ int main(int argc, char *argv[])
     rclcpp::shutdown();
     return 0;
 }
-*/
