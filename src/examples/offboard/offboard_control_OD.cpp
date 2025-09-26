@@ -8,6 +8,8 @@
 #include <cmath>
 #include <vector>
 #include <limits>
+#include <std_msgs/msg/bool.hpp>
+
 
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
@@ -23,13 +25,23 @@ public:
     OffboardControl() : Node("offboard_control") // method constructor
     {
         // PUBLISHERS
-        offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>("/px4_2/fmu/in/offboard_control_mode", 10);
-        trajectory_setpoint_publisher_ = this->create_publisher<TrajectorySetpoint>("/px4_2/fmu/in/trajectory_setpoint", 10);
-        vehicle_command_publisher_ = this->create_publisher<VehicleCommand>("/px4_2/fmu/in/vehicle_command", 10);
+        offboard_control_mode_publisher_ = this->create_publisher<OffboardControlMode>("/fmu/in/offboard_control_mode", 10);
+        trajectory_setpoint_publisher_ = this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
+        vehicle_command_publisher_ = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
 
         // SUBSCRIPTIONS
+            detection_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+            "/detection",
+            10,
+            [this](const std_msgs::msg::Bool::SharedPtr msg) {
+                if (msg->data) {
+                    detection_triggered_ = true;
+                    RCLCPP_INFO(this->get_logger(), "Detection TRUE → landing!");
+                }
+            }
+        );
         odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
-            "/px4_2/fmu/out/vehicle_odometry",
+            "/fmu/out/vehicle_odometry",
             rclcpp::QoS(10).best_effort(),
             [this](const px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
                 //quaternion values for orientation, coming from the odometry message.
@@ -70,7 +82,15 @@ public:
         collecting_initial_pos_ = true;
         initial_collect_start_ = this->now();
 
+        //timer_ = this->create_wall_timer(100ms, [this]() {
         timer_ = this->create_wall_timer(100ms, [this]() {
+            // --- detection check ---
+            if (detection_triggered_ && mission_state_ != DONE) {
+                publish_vehicle_command(VehicleCommand::VEHICLE_CMD_NAV_LAND, 0.0, 0.0);
+                RCLCPP_INFO(this->get_logger(), "Landing due to detection.");
+                mission_state_ = DONE;
+                return;  // stop mission updates
+            }
             if (collecting_initial_pos_) {
                 if ((this->now() - initial_collect_start_).seconds() < 5.0) {
                     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Collecting initial position");
@@ -148,11 +168,14 @@ private:
     rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_publisher_;
     rclcpp::Publisher<VehicleCommand>::SharedPtr vehicle_command_publisher_;
     rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr detection_sub_;
+
 
     uint64_t offboard_setpoint_counter_;
     float current_x_, current_y_, current_z_;
     float current_yaw_;
     float setpoint_x_, setpoint_y_, setpoint_z_;
+    bool detection_triggered_ = false;
     bool collecting_initial_pos_;
     int initial_pos_samples_;
     float initial_x_sum_, initial_y_sum_, initial_z_sum_;

@@ -24,7 +24,7 @@ class WaypointServer(Node):
 
         # Waypoint management
         self.pose_array_msg = PoseArray()
-        self.pose_array_msg.header.frame_id = "map"
+        self.pose_array_msg.header.frame_id = "odom"
         
         # Add initial hover waypoint at (0, 0, -1)
         initial_pose = Pose()
@@ -193,7 +193,7 @@ class WaypointServer(Node):
 
         # Publish PoseStamped for visualization
         pose_stamped = PoseStamped()
-        pose_stamped.header.frame_id = "map"
+        pose_stamped.header.frame_id = "odom"
         pose_stamped.header.stamp = self.get_clock().now().to_msg()
         pose_stamped.pose = pose  
         self.pose_stamped_pub.publish(pose_stamped)
