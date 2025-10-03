@@ -26,13 +26,15 @@ public:
 
         // Define waypoints (square at z = -3 → 3m above ground)
         waypoints_ = {
-            {0.0, 0.0, -3.0},   // takeoff point
-            {5.0, 0.0, -3.0},   // forward
-            {6.0, 2.0, -3.0},   // right
-            {0.0, 2.0, -3.0},   // back
-            {0.0, 4.0, -3.0},   // back
-            {9.0, 3.0, -3.0},   // back
-            {0.0, 0.0, -3.0}    // return to start
+            // {0.0, 0.0, -3.0},   // takeoff point
+            // {5.0, 0.0, -3.0},   // forward
+            // {6.0, 2.0, -3.0},   // right
+            // {0.0, 2.0, -3.0},   // back
+            // {0.0, 4.0, -3.0},   // back
+            // {9.0, 3.0, -3.0},   // back
+            // {0.0, 0.0, -3.0}    // return to start
+        {0.0, 0.0, -3.0},
+        {7.0, 0.0, -3.0}
         };
     }
 

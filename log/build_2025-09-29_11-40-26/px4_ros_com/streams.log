@@ -1,0 +1,30 @@
+[0.007s] Invoking command in '/home/ubuntu/ws_offboard_control/src/px4_ros_com/build/px4_ros_com': CMAKE_PREFIX_PATH=/opt/ros/humble /usr/bin/cmake /home/ubuntu/ws_offboard_control/src/px4_ros_com -DCMAKE_INSTALL_PREFIX=/home/ubuntu/ws_offboard_control/src/px4_ros_com/install/px4_ros_com
+[0.017s] -- Found ament_cmake: 1.3.12 (/opt/ros/humble/share/ament_cmake/cmake)
+[0.125s] -- Found builtin_interfaces: 1.2.2 (/opt/ros/humble/share/builtin_interfaces/cmake)
+[0.150s] -- Found rosidl_generator_c: 3.1.7 (/opt/ros/humble/share/rosidl_generator_c/cmake)
+[0.152s] -- Found rosidl_adapter: 3.1.7 (/opt/ros/humble/share/rosidl_adapter/cmake)
+[0.159s] -- Found rosidl_generator_cpp: 3.1.7 (/opt/ros/humble/share/rosidl_generator_cpp/cmake)
+[0.170s] -- Using all available rosidl_typesupport_c: rosidl_typesupport_fastrtps_c;rosidl_typesupport_introspection_c
+[0.182s] -- Using all available rosidl_typesupport_cpp: rosidl_typesupport_fastrtps_cpp;rosidl_typesupport_introspection_cpp
+[0.193s] -- Found eigen3_cmake_module: 0.1.1 (/opt/ros/humble/share/eigen3_cmake_module/cmake)
+[0.195s] -- Found geometry_msgs: 4.9.0 (/opt/ros/humble/share/geometry_msgs/cmake)
+[0.228s] [31mCMake Error at CMakeLists.txt:24 (find_package):
+[0.228s]   By not providing "Findpx4_msgs.cmake" in CMAKE_MODULE_PATH this project has
+[0.228s]   asked CMake to find a package configuration file provided by "px4_msgs",
+[0.228s]   but CMake did not find one.
+[0.228s] 
+[0.228s]   Could not find a package configuration file provided by "px4_msgs" with any
+[0.228s]   of the following names:
+[0.228s] 
+[0.228s]     px4_msgsConfig.cmake
+[0.228s]     px4_msgs-config.cmake
+[0.228s] 
+[0.228s]   Add the installation prefix of "px4_msgs" to CMAKE_PREFIX_PATH or set
+[0.229s]   "px4_msgs_DIR" to a directory containing one of the above files.  If
+[0.229s]   "px4_msgs" provides a separate development package or SDK, be sure it has
+[0.229s]   been installed.
+[0.229s] 
+[0.229s] [0m
+[0.229s] -- Configuring incomplete, errors occurred!
+[0.229s] See also "/home/ubuntu/ws_offboard_control/src/px4_ros_com/build/px4_ros_com/CMakeFiles/CMakeOutput.log".
+[0.231s] Invoked command in '/home/ubuntu/ws_offboard_control/src/px4_ros_com/build/px4_ros_com' returned '1': CMAKE_PREFIX_PATH=/opt/ros/humble /usr/bin/cmake /home/ubuntu/ws_offboard_control/src/px4_ros_com -DCMAKE_INSTALL_PREFIX=/home/ubuntu/ws_offboard_control/src/px4_ros_com/install/px4_ros_com
