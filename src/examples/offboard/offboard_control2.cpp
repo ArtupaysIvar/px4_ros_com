@@ -216,8 +216,10 @@ private:
         
         // Update setpoint: P2(k+1) = P2(k) + u2(k)
         // P2(k) is the previous setpoint we sent
-        setpoint_x_ = prev_setpoint_x_ + std::clamp(u2_x_, -0.2f, 0.2f);
-        setpoint_y_ = prev_setpoint_y_ + std::clamp(u2_y_, -0.2f, 0.2f);
+        // setpoint_x_ = prev_setpoint_x_ + std::clamp(u2_x_, -0.05f, 0.05f);
+        // setpoint_y_ = prev_setpoint_y_ + std::clamp(u2_y_, -0.05f, 0.05f);
+        setpoint_x_ = prev_setpoint_x_ + u2_x_;
+        setpoint_y_ = prev_setpoint_y_ + u2_y_;
         setpoint_z_ = initial_z_avg_ + u2_z_;  // Maintain altitude reference
         
         // Store current setpoint for next iteration

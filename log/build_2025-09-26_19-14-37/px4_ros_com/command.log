@@ -1,2 +1,0 @@
-Invoking command in '/home/ubuntu/ws_offboard_control/src/px4_ros_com/build/px4_ros_com': CMAKE_PREFIX_PATH=/opt/ros/humble /usr/bin/cmake /home/ubuntu/ws_offboard_control/src/px4_ros_com -DCMAKE_INSTALL_PREFIX=/home/ubuntu/ws_offboard_control/src/px4_ros_com/install/px4_ros_com
-Invoked command in '/home/ubuntu/ws_offboard_control/src/px4_ros_com/build/px4_ros_com' returned '1': CMAKE_PREFIX_PATH=/opt/ros/humble /usr/bin/cmake /home/ubuntu/ws_offboard_control/src/px4_ros_com -DCMAKE_INSTALL_PREFIX=/home/ubuntu/ws_offboard_control/src/px4_ros_com/install/px4_ros_com
