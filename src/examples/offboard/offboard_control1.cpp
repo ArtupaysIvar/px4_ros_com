@@ -8,7 +8,7 @@ using namespace std::chrono_literals;
 class SquareMission : public rclcpp::Node {
 public:
     SquareMission() : Node("square_mission_drone1") {
-        // Publishers
+        
         offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
             "/px4_1/fmu/in/offboard_control_mode", 10);
 
@@ -26,53 +26,81 @@ public:
 
         // Define waypoints (square at z = -3 → 3m above ground)
         waypoints_ = {
-            // {0.0, 0.0, -3.0},   // takeoff point
-            // {5.0, 0.0, -3.0},   // forward
-            // {6.0, 2.0, -3.0},   // right
-            // {0.0, 2.0, -3.0},   // back
-            // {0.0, 4.0, -3.0},   // back
-            // {9.0, 3.0, -3.0},   // back
-            // {0.0, 0.0, -3.0}    // return to start
         {0.0, 0.0, -3.0},
-        {7.0, 0.0, -3.0}
+        {20.0, 0.0, -3.0}
         };
     }
 
 private:
-    void publish_setpoints() {
-        // Always publish offboard control mode
-        px4_msgs::msg::OffboardControlMode offboard_msg{};
-        offboard_msg.position = true;
-        offboard_msg.velocity = false;
-        offboard_msg.acceleration = false;
-        offboard_msg.attitude = false;
-        offboard_msg.body_rate = false;
-        offboard_control_mode_pub_->publish(offboard_msg);
+   void publish_setpoints() {
+    // Always publish offboard control mode
+    px4_msgs::msg::OffboardControlMode offboard_msg{};
+    offboard_msg.position = true;
+    offboard_msg.velocity = false;
+    offboard_msg.acceleration = false;
+    offboard_msg.attitude = false;
+    offboard_msg.body_rate = false;
+    offboard_control_mode_pub_->publish(offboard_msg);
 
-        // After some cycles, arm + set offboard
-        if (counter_ == 10) {
-            arm();
-            set_offboard_mode();
-        }
-
-        // Select current waypoint
-        auto wp = waypoints_[waypoint_index_];
-
-        px4_msgs::msg::TrajectorySetpoint traj{};
-        traj.position = {wp[0], wp[1], wp[2]};
-        traj.yaw = 0.0;  // face forward
-        trajectory_setpoint_pub_->publish(traj);
-
-        // Hold ~5s at each waypoint before moving to next
-        if (counter_ > 50 && counter_ % 50 == 0) {
-            if (waypoint_index_ < waypoints_.size() - 1) {
-                waypoint_index_++;
-                // RCLCPP_INFO(this->get_logger(), "Moving to waypoint %d", waypoint_index_);
-            }
-        }
-
-        counter_++;
+    // Arm + set offboard after a short startup (keep your original timing)
+    if (counter_ == 10) {
+        arm();
+        set_offboard_mode();
     }
+
+    // If we've exhausted waypoints, keep publishing the last one and return
+    if (waypoint_index_ >= waypoints_.size()) {
+        auto last = waypoints_.back();
+        px4_msgs::msg::TrajectorySetpoint traj{};
+        traj.position = {last[0], last[1], last[2]};
+        traj.yaw = 0.0;
+        trajectory_setpoint_pub_->publish(traj);
+        counter_++;
+        return;
+    }
+
+    // If not currently holding, start a hold for the current waypoint.
+    // For waypoint 0 use 500 seconds; otherwise use 5 seconds.
+    if (!holding_) {
+        holding_ = true;
+        hold_counter_ = 0;
+        // 100 ms timer => 10 ticks per second
+        if (waypoint_index_ == 0) {
+            hold_duration_ticks_ = 50 * 10; // 500 s
+        } else {
+            hold_duration_ticks_ = 20 * 10;   // 5 s
+        }
+    }
+
+    // Always publish the current waypoint while holding
+    auto wp = waypoints_[waypoint_index_];
+    px4_msgs::msg::TrajectorySetpoint traj{};
+    traj.position = { wp[0], wp[1], wp[2] };
+    traj.yaw = 0.0;
+    trajectory_setpoint_pub_->publish(traj);
+
+    // Count hold ticks
+    hold_counter_++;
+
+    // If hold finished, move to next waypoint (if any) and reset holding state
+    if (hold_counter_ >= hold_duration_ticks_) {
+        holding_ = false;
+        hold_counter_ = 0;
+        hold_duration_ticks_ = 0;
+
+        // advance to next waypoint if available
+        if (waypoint_index_ < waypoints_.size() - 1) {
+            waypoint_index_++;
+            // Next waypoint will start its hold at the top of the next timer tick
+        } else {
+            // reached final waypoint: we will keep publishing it (see top)
+            waypoint_index_ = waypoints_.size(); // mark finished
+        }
+    }
+
+    counter_++;
+}
+
 
     void arm() {
         px4_msgs::msg::VehicleCommand cmd{};
@@ -107,6 +135,9 @@ private:
     int counter_;
     size_t waypoint_index_;
     std::vector<std::array<float, 3>> waypoints_;
+    bool holding_ = false;
+    int hold_counter_ = 0;
+    int hold_duration_ticks_ = 0; 
 };
 
 int main(int argc, char* argv[]) {

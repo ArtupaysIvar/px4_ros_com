@@ -4,12 +4,13 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
-//#include <geometry_msgs/msg/pose_array.hpp>
 
 #include <chrono>
 #include <cmath>
 #include <deque>
 #include <algorithm>
+#include <vector>
+#include <string>
 
 using namespace std::chrono_literals;
 using namespace px4_msgs::msg;
@@ -17,57 +18,85 @@ using namespace px4_msgs::msg;
 class visNode : public rclcpp::Node
 {
 public:
-visNode() : Node("visNode")
+    visNode(size_t num_drones = 3) : Node("visNode_multi"), num_drones_(num_drones)
     {
-        trajectory_setpoint_pub_ = this->create_publisher<TrajectorySetpoint>("/fmu/in/trajectory_setpoint", 10);
-        pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/drone/pose", 10);
+        trajectory_setpoint_pubs_.resize(num_drones_);
+        pose_pubs_.resize(num_drones_);
+        path_pubs_.resize(num_drones_);
+        path_msgs_.resize(num_drones_);
+        initial_positions_.resize(num_drones_);
 
-        odom_sub_ = this->create_subscription<VehicleOdometry>(
-            "/fmu/out/vehicle_odometry", rclcpp::QoS(10).best_effort(),
-            std::bind(&visNode::odom_callback, this, std::placeholders::_1));
-        path_pub_ = this->create_publisher<nav_msgs::msg::Path>("/drone/path", 10);
-        
-        path_msg_.header.frame_id = "odom";  // Only needs to be set once
-        // timer_ = this->create_wall_timer(100ms, std::bind(&visNode::odom_callback, this));
+        // Set initial positions for each drone
+        // Drone 1: (0, 0), Drone 2: (-2, -2), Drone 3: (2, -2)
+        initial_positions_[0] = {0.0, 0.0, 0.0};
+        initial_positions_[1] = {-2.0, -2.0, 0.0};
+        initial_positions_[2] = {2.0, -2.0, 0.0};
+
+        // create pubs/subs for each drone
+        for (size_t i = 0; i < num_drones_; ++i) {
+            std::string idx = std::to_string(i + 1);
+
+            std::string traj_topic = "/px4_" + idx + "/fmu/in/trajectory_setpoint";
+            trajectory_setpoint_pubs_[i] = this->create_publisher<TrajectorySetpoint>(traj_topic, 10);
+
+            std::string pose_topic = "/drone" + idx + "/pose";
+            pose_pubs_[i] = this->create_publisher<geometry_msgs::msg::PoseStamped>(pose_topic, 10);
+
+            std::string path_topic = "/drone" + idx + "/path";
+            path_pubs_[i] = this->create_publisher<nav_msgs::msg::Path>(path_topic, 10);
+
+            // initialize path frame
+            path_msgs_[i].header.frame_id = "odom";
+
+            std::string odom_topic = "/px4_" + idx + "/fmu/out/vehicle_odometry";
+            auto qos = rclcpp::QoS(10).best_effort();
+
+            // subscribe, capture index by value
+            odom_subs_.push_back(
+                this->create_subscription<VehicleOdometry>(
+                    odom_topic, qos,
+                    [this, i](const VehicleOdometry::SharedPtr msg) { this->odom_callback(i, msg); }
+                )
+            );
+        }
+
+        RCLCPP_INFO(this->get_logger(), "visNode_multi started for %zu drones", num_drones_);
     }
-    private:
-    rclcpp::Publisher<TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
-    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
-    rclcpp::Subscription<VehicleOdometry>::SharedPtr odom_sub_;
-    rclcpp::TimerBase::SharedPtr timer_;
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
-    nav_msgs::msg::Path path_msg_;
 
-    float current_x_ = 0.0f, current_y_ = 0.0f, current_z_ = 0.0f;
-    float current_yaw_ = 0.0f;
-    
+private:
+    size_t num_drones_;
 
-    void odom_callback(const VehicleOdometry::SharedPtr msg)
+    std::vector<rclcpp::Publisher<TrajectorySetpoint>::SharedPtr> trajectory_setpoint_pubs_;
+    std::vector<rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr> pose_pubs_;
+    std::vector<rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr> path_pubs_;
+    std::vector<rclcpp::Subscription<VehicleOdometry>::SharedPtr> odom_subs_;
+
+    std::vector<nav_msgs::msg::Path> path_msgs_;
+    std::vector<std::array<double, 3>> initial_positions_;
+
+    // convert each vehicle_odometry msg into PoseStamped and Path (NED -> ENU)
+    void odom_callback(size_t idx, const VehicleOdometry::SharedPtr msg)
     {
-        current_x_ = msg->position[0];
-        current_y_ = msg->position[1];
-        current_z_ = msg->position[2];
-
-        float q0 = msg->q[0], q1 = msg->q[1], q2 = msg->q[2], q3 = msg->q[3];
-        current_yaw_ = std::atan2(2.0f * (q0 * q3 + q1 * q2),
-                                  1.0f - 2.0f * (q2 * q2 + q3 * q3));
+        if (idx >= num_drones_) return;
 
         geometry_msgs::msg::PoseStamped pose_msg;
         pose_msg.header.stamp = this->get_clock()->now();
-        pose_msg.header.frame_id = "odom";  // Change if you're using different TF root
+        pose_msg.header.frame_id = "odom";
 
-        // --- NED → ENU: Position ---
-        pose_msg.pose.position.x =  msg->position[1];   // y_NED → x_ENU
-        pose_msg.pose.position.y =  msg->position[0];   // x_NED → y_ENU
-        pose_msg.pose.position.z = -msg->position[2];   // -z_NED → z_ENU
+        // --- NED -> ENU position with offset ---
+        // msg->position = [x_NED, y_NED, z_NED]
+        // Apply initial position offset in ENU frame
+        pose_msg.pose.position.x = msg->position[1] + initial_positions_[idx][0];   // y_NED -> x_ENU + offset
+        pose_msg.pose.position.y = msg->position[0] + initial_positions_[idx][1];   // x_NED -> y_ENU + offset
+        pose_msg.pose.position.z = -msg->position[2] + initial_positions_[idx][2];  // -z_NED -> z_ENU + offset
 
-        // --- NED → ENU: Orientation (q_NED to q_ENU) ---
-        // Conversion: q_ENU = q_rot * q_NED
-        // Where q_rot = [0.5, 0.5, -0.5, 0.5] (90 deg around Z then X)
-        tf2::Quaternion q_ned(msg->q[1], msg->q[0], msg->q[2], msg->q[3]);  // PX4 uses [x, y, z, w] in NED
+        // --- NED -> ENU orientation (arrow pointing UP perpendicular to grid) ---
+        // msg->q is [x, y, z, w] (PX4 ordering)
+        tf2::Quaternion q_ned(msg->q[0], msg->q[1], msg->q[2], msg->q[3]); // (x,y,z,w)
         tf2::Quaternion q_rot;
-        q_rot.setRPY(M_PI, 0, M_PI/2);  // Rotate 90 deg around Z, then 180 around X
-
+        // Rotate to make arrow point up (perpendicular to XY plane)
+        // Rotate 90 degrees around Y axis to point arrow up
+        q_rot.setRPY(0.0, -M_PI / 2.0, 0.0);
         tf2::Quaternion q_enu = q_rot * q_ned;
         q_enu.normalize();
 
@@ -76,30 +105,26 @@ visNode() : Node("visNode")
         pose_msg.pose.orientation.z = q_enu.z();
         pose_msg.pose.orientation.w = q_enu.w();
 
-        pose_pub_->publish(pose_msg);
-        /*
-        trajectory_.header.frame_id = msg.header.frame_id;
-        geometry_msgs::msg::PoseStamped curr_pose;
-        curr_pose.header.frame_id = msg.header.frame_id;
-        curr_pose.header.stamp = msg.header.stamp;
-        curr_pose.pose = msg.pose.pose;
-        trajectory_.poses.push_back(curr_pose);*/
+        // publish pose
+        pose_pubs_[idx]->publish(pose_msg);
 
-   
-        // path_msg_.header.frame_id = "map";  // Same frame as PoseStamped
-        path_msg_.header.stamp = this->get_clock()->now();
-        path_msg_.poses.push_back(pose_msg);
-        path_pub_->publish(path_msg_);
+        // append to path and publish (no trimming to keep path persistent)
+        path_msgs_[idx].header.stamp = pose_msg.header.stamp;
+        path_msgs_[idx].poses.push_back(pose_msg);
+
+        path_pubs_[idx]->publish(path_msgs_[idx]);
     }
 };
 
 
 int main(int argc, char* argv[])
 {
-    std::cout << "Starting 3d visualization node..." << std::endl;
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<visNode>());
+    // default 3 drones
+    auto node = std::make_shared<visNode>(3);
+
+    // use single-threaded executor to avoid needing locks (path growth trimming is done inline)
+    rclcpp::spin(node);
     rclcpp::shutdown();
     return 0;
 }
-

@@ -7,12 +7,101 @@
 
 using namespace std::chrono_literals;
 
+struct displacement_based_control {
+    double u_x, u_y, u_z;
+    double x=0.0, y=0.0, z=0.0;
+    double x_lead=0.0, y_lead=0.0, z_lead=0.0;
+    double x_des=-2.0, y_des=-2.0, z_des=0.0;
+    double x_lead_des=0.0, y_lead_des=0.0, z_lead_des=0.0;
+        
+    // void displacement_algo() {
+    //     double u_x = -(x - x_lead) + (x_des - x_lead_des);
+    //     double u_y = -(y - y_lead) + (y_des - y_lead_des);
+    //     double u_z = -(z - z_lead) + (z_des - z_lead_des);
+    // }
+
+    displacement_based_control displacement_algo() {
+    displacement_based_control u;
+ 
+    u.u_x = -(x - x_lead) + (x_des - x_lead_des);
+    u.u_y = -(y - y_lead) + (y_des - y_lead_des);
+    u.u_z = -(z - z_lead) + (z_des - z_lead_des);
+    return u;
+}
+
+};
+
+
+struct collecting_data {
+    int initial_samples_ = 0;
+    float initial_x_sum_ = 0.0f, initial_y_sum_ = 0.0f, initial_z_sum_ = 0.0f;
+    float initial_x_avg_ = 0.0f, initial_y_avg_ = 0.0f, initial_z_avg_ = 0.0f;
+
+    // Pass the values as parameters
+    void collect_initial_position(double x, double y, double z) {
+        if (initial_samples_ == 0 || (std::abs(x) > 0.01f || std::abs(y) > 0.01f)) {
+            initial_x_sum_ += x;
+            initial_y_sum_ += y;
+            initial_z_sum_ += z;
+            initial_samples_++;
+        }
+    }
+
+    // Pass logger and bool flag as parameters
+    void finalize_initial_position(rclcpp::Logger logger, bool& collecting_flag) {
+        if (initial_samples_ > 0) {
+            initial_x_avg_ = initial_x_sum_ / initial_samples_;
+            initial_y_avg_ = initial_y_sum_ / initial_samples_;
+            initial_z_avg_ = -3.0f;
+            collecting_flag = false;
+            
+            RCLCPP_INFO(logger, 
+                "[INIT] Initial position: x=%.2f, y=%.2f, z=%.2f (samples: %d)", 
+                initial_x_avg_, initial_y_avg_, initial_z_avg_, initial_samples_);
+        }
+    }
+};
+
+// struct collecting_data{
+//     int initial_samples_ = 0;
+//     float initial_x_sum_ = 0.0f, initial_y_sum_ = 0.0f, initial_z_sum_ = 0.0f;
+//     float initial_x_avg_ = 0.0f, initial_y_avg_ = 0.0f, initial_z_avg_ = 0.0f;
+
+//     void collect_initial_position()
+//     {
+
+//         // use dbc_.x / dbc_.y / dbc_.z (follower actual)
+//         if (initial_samples_ == 0 || (std::abs(dbc_.x) > 0.01f || std::abs(dbc_.y) > 0.01f)) {
+//             initial_x_sum_ += dbc_.x;
+//             initial_y_sum_ += dbc_.y;
+//             initial_z_sum_ += dbc_.z;
+//             initial_samples_++;
+//         }
+//     }
+
+//     void finalize_initial_position()
+//     {
+//         if (initial_samples_ > 0) {
+//             initial_x_avg_ = initial_x_sum_ / initial_samples_;
+//             initial_y_avg_ = initial_y_sum_ / initial_samples_;
+//             // keep z fixed to -3.0
+//             initial_z_avg_ = -3.0f;
+//             collecting_initial_pos_ = false;
+            
+//             RCLCPP_INFO(this->get_logger(), 
+//                 "[INIT] Initial position: x=%.2f, y=%.2f, z=%.2f (samples: %d)", 
+//                 initial_x_avg_, initial_y_avg_, initial_z_avg_, initial_samples_);
+//         }
+//     }
+
+// };
+
+
 class DistanceStepDrone2 : public rclcpp::Node
 {
 public:
     DistanceStepDrone2() : Node("distance_step_drone2")
     {
-        // Publishers for drone 2 namespace
         offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
             "/px4_2/fmu/in/offboard_control_mode", 10);
         trajectory_setpoint_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
@@ -28,53 +117,20 @@ public:
         odom1_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/px4_1/fmu/out/vehicle_odometry", 
             qos_profile,
-            std::bind(&DistanceStepDrone2::odom1_callback, this, std::placeholders::_1));
+            std::bind(&DistanceStepDrone2::odom_lead_callback, this, std::placeholders::_1));
 
         odom2_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/px4_2/fmu/out/vehicle_odometry", 
             qos_profile,
-            std::bind(&DistanceStepDrone2::odom2_callback, this, std::placeholders::_1));
+            std::bind(&DistanceStepDrone2::odom_own_callback, this, std::placeholders::_1));
 
         // Timer to send setpoints periodically
         timer_ = create_wall_timer(100ms, std::bind(&DistanceStepDrone2::publish_setpoints, this));
         
-        // Initialize variables
+        
         counter_ = 0;
         collecting_initial_pos_ = true;
         initial_samples_ = 0;
-        
-        // Distance-step control parameters
-        step_gain_ = 0.1f;  // Control gain
-        
-        // Desired relative position from Drone 1 to Drone 2
-        // P2_des = [x_des, y_des] - where drone 2 should be relative to drone 1
-        desired_rel_x_ = 0.0f;   // 0m offset in x
-        desired_rel_y_ = -2.0f;  // 2m behind drone 1 (negative y)
-        desired_rel_z_ = 0.0f;   // Same altitude
-        
-        // Initialize positions
-        drone1_x_ = 0.0f; drone1_y_ = 0.0f; drone1_z_ = 0.0f;
-        drone2_x_ = 0.0f; drone2_y_ = 0.0f; drone2_z_ = 0.0f;
-        drone1_data_received_ = false;
-        drone2_data_received_ = false;
-        setpoint_x_ = 0.0f; setpoint_y_ = 0.0f; setpoint_z_ = -3.0f;
-        prev_setpoint_x_ = 0.0f; prev_setpoint_y_ = 0.0f; prev_setpoint_z_ = -3.0f;
-        current_yaw_ = 0.0f;
-        
-        // Control input variables
-        u2_x_ = 0.0f; u2_y_ = 0.0f; u2_z_ = 0.0f;
-        
-        // Initial position collection
-        initial_x_sum_ = 0.0f; initial_y_sum_ = 0.0f; initial_z_sum_ = 0.0f;
-        initial_x_avg_ = 0.0f; initial_y_avg_ = 0.0f; initial_z_avg_ = -3.0f;
-        
-        // RCLCPP_INFO(this->get_logger(), "=== DISTANCE-STEP CONTROL DRONE 2 STARTED ===");
-        // RCLCPP_INFO(this->get_logger(), "Theory: P2(k+1) = P2(k) + u2(k)");
-        // RCLCPP_INFO(this->get_logger(), "Where: u2(k) = -(P2(k) - P1(k)) + (P2_des - P1_des)");
-        // RCLCPP_INFO(this->get_logger(), "Desired relative position: [%.1f, %.1f, %.1f]", 
-        //     desired_rel_x_, desired_rel_y_, desired_rel_z_);
-        // RCLCPP_INFO(this->get_logger(), "Subscribing to: /px4_1/fmu/out/vehicle_odometry");
-        // RCLCPP_INFO(this->get_logger(), "Subscribing to: /px4_2/fmu/out/vehicle_odometry");
     }
 
 private:
@@ -92,25 +148,29 @@ private:
 
         // Phase 1: Collect initial position (first 50 cycles = 5 seconds)
         if (counter_ < 50 && collecting_initial_pos_) {
-            collect_initial_position();
-            setpoint_x_ = drone2_x_;
-            setpoint_y_ = drone2_y_;
-            setpoint_z_ = -3.0f;
+            // collecting_data.collect_initial_position();
+            setpoint_x_ = dbc_.x;       // use struct follower's current x
+            setpoint_y_ = dbc_.y;
+            setpoint_z_ = dbc_.z;
+
+            // setpoint_z_ = -3.0f;
+            collecting_data_.collect_initial_position(dbc_.x, dbc_.y, dbc_.z);
+
             
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
                 "[INIT] Collecting initial position... %d/50", counter_);
         }
         // Phase 2: Arm and set offboard mode
         else if (counter_ == 50) {
-            finalize_initial_position();
+            collecting_data_.finalize_initial_position(this->get_logger(), collecting_initial_pos_);
             arm();
             set_offboard_mode();
         }
         // Phase 3: Wait after arming (next 30 cycles = 3 seconds)
         else if (counter_ < 80) {
-            setpoint_x_ = initial_x_avg_;
-            setpoint_y_ = initial_y_avg_;
-            setpoint_z_ = initial_z_avg_;
+            setpoint_x_ = collecting_data_.initial_x_avg_;
+            setpoint_y_ = collecting_data_.initial_y_avg_;
+            setpoint_z_ = collecting_data_.initial_z_avg_;
             
             if (counter_ == 79) {
                 RCLCPP_INFO(this->get_logger(), "[READY] Starting distance-step control algorithm...");
@@ -120,21 +180,23 @@ private:
                 prev_setpoint_z_ = setpoint_z_;
             }
         }
-        // Phase 4: Distance-step control algorithm
+        // Phase 4: Normal control - send current setpoint (algorithm may update elsewhere)
         else {
-            if (drone2_data_received_ && drone2_z_ <= -2.5f) {  
+            // call algorithm update when both odoms are present and drone is roughly at safe altitude
+            if (drone_lead_data_received_ && dbc_.z <= -2.5) {
                 apply_distance_step_algorithm();
             } else {
-                // Hold position at initial setpoint until altitude condition is met
+                // hold previous setpoint
                 setpoint_x_ = prev_setpoint_x_;
                 setpoint_y_ = prev_setpoint_y_;
-                setpoint_z_ = initial_z_avg_;
+                setpoint_z_ = prev_setpoint_z_;
 
                 RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                     "[WAIT] Holding until Drone 2 reaches safe altitude (z=-3m). Current z=%.2f",
-                    drone2_z_);
+                    dbc_.z);
             }
         }
+
         // Send position setpoint
         px4_msgs::msg::TrajectorySetpoint traj{};
         traj.position = {setpoint_x_, setpoint_y_, setpoint_z_};
@@ -145,47 +207,20 @@ private:
         counter_++;
     }
 
-    void collect_initial_position()
-    {
-        if (initial_samples_ == 0 || 
-            (std::abs(drone2_x_) > 0.01f || std::abs(drone2_y_) > 0.01f)) {
-            initial_x_sum_ += drone2_x_;
-            initial_y_sum_ += drone2_y_;
-            initial_z_sum_ += drone2_z_;
-            initial_samples_++;
-        }
-    }
-
-    void finalize_initial_position()
-    {
-        if (initial_samples_ > 0) {
-            initial_x_avg_ = initial_x_sum_ / initial_samples_;
-            initial_y_avg_ = initial_y_sum_ / initial_samples_;
-            // initial_z_avg_ = std::max(initial_z_sum_ / initial_samples_, -3.0f);
-            initial_z_avg_ = -3.0f;
-            collecting_initial_pos_ = false;
-            
-            RCLCPP_INFO(this->get_logger(), 
-                "[INIT] Initial position: x=%.2f, y=%.2f, z=%.2f (samples: %d)", 
-                initial_x_avg_, initial_y_avg_, initial_z_avg_, initial_samples_);
-        }
-    }
+    
 
     void apply_distance_step_algorithm()
     {
-        // Check if we have valid odometry data from both drones
-        if (!drone1_data_received_) {
+        // Check odometry
+        if (!drone_own_data_received_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
                 "[WARNING] Waiting for Drone 1 odometry data. Check if Drone 1 is running!");
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "[INFO] Expected topic: /px4_1/fmu/out/vehicle_odometry");
             setpoint_x_ = prev_setpoint_x_;
             setpoint_y_ = prev_setpoint_y_;
             setpoint_z_ = prev_setpoint_z_;
             return;
         }
-        
-        if (!drone2_data_received_) {
+        if (!drone_lead_data_received_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
                 "[WARNING] Waiting for Drone 2 odometry data");
             setpoint_x_ = prev_setpoint_x_;
@@ -194,85 +229,65 @@ private:
             return;
         }
 
-        float P2_actual_x = drone2_x_ - drone1_x_; 
-        float P2_actual_y = drone2_y_ - drone1_y_;
-        float P2_actual_z = drone2_z_ - drone1_z_;
+        // Compute u using the struct (P1_des assumed zero unless set otherwise)
+        auto u = dbc_.displacement_algo();
+
+        setpoint_x_ = prev_setpoint_x_ + u.u_x * step_gain_;
+        setpoint_y_ = prev_setpoint_y_ + u.u_y * step_gain_;
+        setpoint_z_ = prev_setpoint_z_ + u.u_z * step_gain_;
         
-        // P1_des is [0,0,0] (drone 1 position is the reference)
-        // P2_des - P1_des = P2_des - [0,0,0] = P2_des
-        float P2_des_x = desired_rel_x_;
-        float P2_des_y = desired_rel_y_;
-        float P2_des_z = desired_rel_z_;
-        
-        // Calculate control input: u2(k) = -(P2_actual) + (P2_des)
-        u2_x_ = -(P2_actual_x) + P2_des_x;
-        u2_y_ = -(P2_actual_y) + P2_des_y;
-        u2_z_ = -(P2_actual_z) + P2_des_z;
-        
-        // Apply gain to control input
-        u2_x_ *= step_gain_;
-        u2_y_ *= step_gain_;
-        u2_z_ *= step_gain_;
-        
-        // Update setpoint: P2(k+1) = P2(k) + u2(k)
-        // P2(k) is the previous setpoint we sent
-        // setpoint_x_ = prev_setpoint_x_ + std::clamp(u2_x_, -0.05f, 0.05f);
-        // setpoint_y_ = prev_setpoint_y_ + std::clamp(u2_y_, -0.05f, 0.05f);
-        setpoint_x_ = prev_setpoint_x_ + u2_x_;
-        setpoint_y_ = prev_setpoint_y_ + u2_y_;
-        setpoint_z_ = initial_z_avg_ + u2_z_;  // Maintain altitude reference
-        
-        // Store current setpoint for next iteration
         prev_setpoint_x_ = setpoint_x_;
         prev_setpoint_y_ = setpoint_y_;
         prev_setpoint_z_ = setpoint_z_;
-        
-        // Calculate position error for monitoring
-        float pos_error_x = P2_actual_x - P2_des_x;
-        float pos_error_y = P2_actual_y - P2_des_y;
-        float distance_error = std::sqrt(pos_error_x * pos_error_x + pos_error_y * pos_error_y);
-        
-        // Debug messages every 1 second
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-            "[POSITIONS] D1: [%.2f, %.2f] | D2: [%.2f, %.2f]", 
-            drone1_x_, drone1_y_, drone2_x_, drone2_y_);
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-            "[RELATIVE] Actual: [%.2f, %.2f] | Desired: [%.2f, %.2f]", 
-            P2_actual_x, P2_actual_y, P2_des_x, P2_des_y);
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-            "[CONTROL] u2(k): [%.3f, %.3f, %.3f]", 
-            u2_x_, u2_y_, u2_z_);
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-            "[SETPOINT] P2(k+1): [%.2f, %.2f, %.2f]", 
-            setpoint_x_, setpoint_y_, setpoint_z_);
-        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
-            "[ERROR] Distance error: %.3f meters", distance_error);
+
+        // // Compute errors for logging
+        // double P2_actual_x = dbc_.x - dbc_.x_lead;
+        // double P2_actual_y = dbc_.y - dbc_.y_lead;
+        // double pos_error_x = P2_actual_x - dbc_.x_des;
+        // double pos_error_y = P2_actual_y - dbc_.y_des;
+        // double distance_error = std::sqrt(pos_error_x * pos_error_x + pos_error_y * pos_error_y);
+                
+
+        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        //     "[POSITIONS] D1: [%.2f, %.2f] | D2: [%.2f, %.2f]", 
+        //     dbc_.x_lead, dbc_.y_lead, dbc_.x, dbc_.y);
+        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        //     "[RELATIVE] Actual: [%.2f, %.2f] | Desired: [%.2f, %.2f]", 
+        //     P2_actual_x, P2_actual_y, dbc_.x_des, dbc_.y_des);
+        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        //     "[CONTROL] u(k): [%.3f, %.3f, %.3f]", 
+        //     u_x, u_y, u_z);
+        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        //     "[SETPOINT] P2(k+1): [%.2f, %.2f, %.2f]", 
+        //     setpoint_x_, setpoint_y_, setpoint_z_);
+        // RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        //     "[ERROR] Distance error: %.3f meters", distance_error);
     }
 
-    void odom1_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
+    void odom_own_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
     {
-        drone1_x_ = msg->position[0];
-        drone1_y_ = msg->position[1];
-        drone1_z_ = msg->position[2];
+        dbc_.x = msg->position[0];
+        dbc_.y = msg->position[1];
+        dbc_.z = msg->position[2];
         
-        if (!drone1_data_received_) {
-            drone1_data_received_ = true;
+        if (!drone_own_data_received_) {
+            drone_own_data_received_ = true;
             RCLCPP_INFO(this->get_logger(), "[SUCCESS] Drone 1 odometry data received!");
         }
         
         RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
             "[ODOM1] Drone 1 position: [%.2f, %.2f, %.2f]", 
-            drone1_x_, drone1_y_, drone1_z_);
+            dbc_.x, dbc_.y, dbc_.z);
     }
 
-    void odom2_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
+    void odom_lead_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
     {
-        drone2_x_ = msg->position[0];
-        drone2_y_ = msg->position[1];
-        drone2_z_ = msg->position[2];
+        dbc_.x_lead = msg->position[0];
+        dbc_.y_lead = msg->position[1];
+        dbc_.z_lead = msg->position[2];
         
-        if (!drone2_data_received_) {
-            drone2_data_received_ = true;
+        if (!drone_lead_data_received_) {
+            drone_lead_data_received_ = true;
             RCLCPP_INFO(this->get_logger(), "[SUCCESS] Drone 2 odometry data received!");
         }
         
@@ -283,7 +298,7 @@ private:
         
         RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
             "[ODOM2] Drone 2 position: [%.2f, %.2f, %.2f], yaw: %.2f", 
-            drone2_x_, drone2_y_, drone2_z_, current_yaw_);
+            dbc_.x_lead, dbc_.y_lead, dbc_.z_lead, current_yaw_);
     }
 
     void arm()
@@ -327,29 +342,19 @@ private:
     rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom2_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
-    // Control variables
-    int counter_;
+    displacement_based_control dbc_;
+    collecting_data collecting_data_;
+    
+    int counter_ = 0;
     bool collecting_initial_pos_;
-    int initial_samples_;
+    int initial_samples_ = 0;    
+    bool drone_own_data_received_= false;
+    bool drone_lead_data_received_ = false;
     
-    // Distance-step algorithm parameters
-    float step_gain_;
-    float desired_rel_x_, desired_rel_y_, desired_rel_z_;  // P2_des
-    
-    // Position tracking
-    float drone1_x_, drone1_y_, drone1_z_;  // P1(k) - drone 1 current position
-    float drone2_x_, drone2_y_, drone2_z_;  // Drone 2 current position (for comparison)
-    bool drone1_data_received_, drone2_data_received_;  // Data received flags
-    float setpoint_x_, setpoint_y_, setpoint_z_;  // P2(k+1) - next setpoint
-    float prev_setpoint_x_, prev_setpoint_y_, prev_setpoint_z_;  // P2(k) - previous setpoint
+    float step_gain_ = 0.01;
+    float prev_setpoint_x_, prev_setpoint_y_, prev_setpoint_z_;
+    float setpoint_x_, setpoint_y_, setpoint_z_;
     float current_yaw_;
-    
-    // Control input
-    float u2_x_, u2_y_, u2_z_;  // u2(k)
-    
-    // Initial position averaging
-    float initial_x_sum_, initial_y_sum_, initial_z_sum_;
-    float initial_x_avg_, initial_y_avg_, initial_z_avg_;
 };
 
 int main(int argc, char* argv[])
