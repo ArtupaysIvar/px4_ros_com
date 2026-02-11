@@ -6,17 +6,15 @@
         "limitSymbolsToIncludedHeaders": false
       },
       "includePath": [
-        "/home/artupays/drone_code_ws/install/px4_ros_com/include/**",
-        "/home/artupays/drone_code_ws/install/px4_msgs/include/**",
         "/opt/ros/humble/include/**",
-        "/home/artupays/drone_code_ws/src/px4_ros_com/include/**",
-        "/usr/include/**"
+        "/usr/include/**",
+        "${workspaceFolder}/**"
       ],
-      "name": "ROS",
+      "name": "ros2",
       "intelliSenseMode": "gcc-x64",
       "compilerPath": "/usr/bin/gcc",
       "cStandard": "gnu11",
-      "cppStandard": "c++14"
+      "cppStandard": "c++17"
     }
   ],
   "version": 4

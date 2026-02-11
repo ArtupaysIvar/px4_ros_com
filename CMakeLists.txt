@@ -40,26 +40,27 @@ include_directories(include)
 # Add frame_transforms lib
 add_library(frame_transforms SHARED src/lib/frame_transforms.cpp)
 ament_target_dependencies(frame_transforms Eigen3 geometry_msgs sensor_msgs)
+
 target_include_directories(frame_transforms PUBLIC
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/${PROJECT_NAME}>
 	$<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
 
 
-# examples/listeners/sensor_combined_listener
-add_executable(sensor_combined_listener src/examples/listeners/sensor_combined_listener.cpp)
-ament_target_dependencies(sensor_combined_listener rclcpp px4_msgs)
-install(TARGETS sensor_combined_listener DESTINATION lib/${PROJECT_NAME})
+# # examples/listeners/sensor_combined_listener
+# add_executable(sensor_combined_listener src/examples/listeners/sensor_combined_listener.cpp)
+# ament_target_dependencies(sensor_combined_listener rclcpp px4_msgs)
+# install(TARGETS sensor_combined_listener DESTINATION lib/${PROJECT_NAME})
 
-# examples/listeners/vehicle_gps_position_listener
-add_executable(vehicle_gps_position_listener src/examples/listeners/vehicle_gps_position_listener.cpp)
-ament_target_dependencies(vehicle_gps_position_listener rclcpp px4_msgs)
-install(TARGETS vehicle_gps_position_listener DESTINATION lib/${PROJECT_NAME})
+# # examples/listeners/vehicle_gps_position_listener
+# add_executable(vehicle_gps_position_listener src/examples/listeners/vehicle_gps_position_listener.cpp)
+# ament_target_dependencies(vehicle_gps_position_listener rclcpp px4_msgs)
+# install(TARGETS vehicle_gps_position_listener DESTINATION lib/${PROJECT_NAME})
 
-# examples/advertisers/debug_vect_advertiser
-add_executable(debug_vect_advertiser src/examples/advertisers/debug_vect_advertiser.cpp)
-ament_target_dependencies(debug_vect_advertiser rclcpp px4_msgs)
-install(TARGETS debug_vect_advertiser DESTINATION lib/${PROJECT_NAME})
+# # examples/advertisers/debug_vect_advertiser
+# add_executable(debug_vect_advertiser src/examples/advertisers/debug_vect_advertiser.cpp)
+# ament_target_dependencies(debug_vect_advertiser rclcpp px4_msgs)
+# install(TARGETS debug_vect_advertiser DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/offboard_control
 add_executable(offboard_control src/examples/offboard/offboard_control.cpp)
@@ -80,17 +81,6 @@ install(TARGETS offboard_control2 DESTINATION lib/${PROJECT_NAME})
 add_executable(offboard_control3 src/examples/offboard/offboard_control3.cpp)
 ament_target_dependencies(offboard_control3 rclcpp px4_msgs std_msgs)
 install(TARGETS offboard_control3 DESTINATION lib/${PROJECT_NAME})
-
-# examples/offboard/offboard_control_OD
-add_executable(offboard_control_OD src/examples/offboard/offboard_control_OD.cpp)
-ament_target_dependencies(offboard_control_OD rclcpp px4_msgs std_msgs)
-install(TARGETS offboard_control_OD DESTINATION lib/${PROJECT_NAME})
-
-# examples/offboard/offboard_control_srv
-add_executable(offboard_control_srv src/examples/offboard/offboard_control_srv.cpp)
-ament_target_dependencies(offboard_control_srv rclcpp px4_msgs std_msgs sensor_msgs cv_bridge OpenCV geometry_msgs)
-target_link_libraries(offboard_control_srv ${OpenCV_LIBS}) 
-install(TARGETS offboard_control_srv DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/coba_coba
 add_executable(coba_coba src/examples/offboard/coba_coba.cpp)
