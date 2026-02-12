@@ -69,7 +69,8 @@ install(TARGETS offboard_control DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/offboard_control1
 add_executable(offboard_control1 src/examples/offboard/offboard_control1.cpp)
-ament_target_dependencies(offboard_control1 rclcpp px4_msgs std_msgs)
+ament_target_dependencies(offboard_control1 rclcpp px4_msgs std_msgs Eigen3)
+target_link_libraries(offboard_control1 Eigen3::Eigen)
 install(TARGETS offboard_control1 DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/offboard_control2
