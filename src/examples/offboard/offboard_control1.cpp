@@ -2,38 +2,97 @@
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
+#include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <Eigen/Dense>
+#include <Eigen/Geometry> 
 
 using namespace std::chrono_literals;
 
-class SquareMission : public rclcpp::Node {
+class Drone1Control : public rclcpp::Node {
 public:
-    SquareMission() : Node("square_mission_drone1") {
-        
-        offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
-            "/px4_1/fmu/in/offboard_control_mode", 10);
-
-        trajectory_setpoint_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
-            "/px4_1/fmu/in/trajectory_setpoint", 10);
-
-        vehicle_command_pub_ = create_publisher<px4_msgs::msg::VehicleCommand>(
-            "/px4_1/fmu/in/vehicle_command", 10);
-
-        // Timer for periodic publishing
-        timer_ = create_wall_timer(100ms, std::bind(&SquareMission::publish_setpoints, this));
-
-        counter_ = 0;
-        waypoint_index_ = 0;
-
-        // Define waypoints (square at z = -3 → 3m above ground)
-        waypoints_ = {
-        {0.0, 0.0, -3.0},
-        {20.0, 0.0, -3.0}
-        };
-    }
+    Drone1Control();
 
 private:
-   void publish_setpoints() {
-    // Always publish offboard control mode
+    void odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg);
+    // void publish_displacement();
+    void offboard_control();
+    void arm();
+    void set_offboard_mode();
+    // void trajectory_setpoint();
+    void relative_setpoint();
+
+    // publishers
+    rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
+    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
+    rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_pub_;
+    
+    // subscriber and timer
+    rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr vehicle_odom_sub_;
+
+    // buat dapet orientasi dan kalkulasi rotational angle
+    float current_yaw_{0.0};
+    float current_z{0.0};
+    Eigen::Matrix2f yaw_rotational_matrix;
+    Eigen::Vector3f global_position;
+    Eigen::Vector2f global_position_2d;
+
+    Eigen::Vector2f global_pos_2d_;
+    Eigen::Vector2f body_setpoint;   
+    Eigen::Matrix2f yaw_rot_matrix;
+    Eigen::Vector2f target_pos;
+};
+
+Drone1Control::Drone1Control(): Node("drone1_control_node") 
+{
+    offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
+        "/px4_1/fmu/in/offboard_control_mode", 10);
+    trajectory_setpoint_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
+        "/px4_1/fmu/in/trajectory_setpoint", 10);
+    vehicle_command_pub_ = create_publisher<px4_msgs::msg::VehicleCommand>(
+        "/px4_1/fmu/in/vehicle_command", 10);
+
+    vehicle_odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
+        "/fmu/out/vehicle_odometry", rclcpp::QoS(10).best_effort(),
+        std::bind(&Drone1Control::odom_callback, this, std::placeholders::_1));
+
+    timer_ = create_wall_timer(100ms, std::bind(&Drone1Control::relative_setpoint, this));
+    
+    // JANGAN LUPA SET WAYPOINT NYA
+    body_setpoint << 0, 1; 
+}
+void Drone1Control::odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg)
+{
+    float qw = odom_msg->q[0];
+    float qx = odom_msg->q[1];
+    float qy = odom_msg->q[2];
+    float qz = odom_msg->q[3];
+
+    current_yaw_ = std::atan2(
+        2.0f * (qw * qz + qx * qy),
+        1.0f - 2.0f * (qy * qy + qz * qz)
+    );
+    /* ubah dari quaternion to yaw using:
+    yaw = atan2(2 * (q_w * q_z + q_x * q_y), 1 - 2 * (q_y^2 + q_z^2)) for
+    */
+    yaw_rotational_matrix =  Eigen::Rotation2Df(current_yaw_).toRotationMatrix();
+    // global_position << odom_msg->position[0], odom_msg->position[1], odom_msg->position[2];
+    global_position_2d << odom_msg->position[0], odom_msg->position[1];
+    current_z = odom_msg->position[2];
+}
+
+void Drone1Control::relative_setpoint(){
+    // body_setpoint << 0, 1; 
+    target_pos = global_position_2d + (yaw_rotational_matrix * body_setpoint);
+    px4_msgs::msg::TrajectorySetpoint traj{};
+    traj.position = {target_pos[0], target_pos[1], current_z};
+    trajectory_setpoint_pub_->publish(traj);
+}
+
+
+
+void Drone1Control::offboard_control() {
+// publisher pertama (offboard)
     px4_msgs::msg::OffboardControlMode offboard_msg{};
     offboard_msg.position = true;
     offboard_msg.velocity = false;
@@ -41,108 +100,36 @@ private:
     offboard_msg.attitude = false;
     offboard_msg.body_rate = false;
     offboard_control_mode_pub_->publish(offboard_msg);
-
-    // Arm + set offboard after a short startup (keep your original timing)
-    if (counter_ == 10) {
-        arm();
-        set_offboard_mode();
-    }
-
-    // If we've exhausted waypoints, keep publishing the last one and return
-    if (waypoint_index_ >= waypoints_.size()) {
-        auto last = waypoints_.back();
-        px4_msgs::msg::TrajectorySetpoint traj{};
-        traj.position = {last[0], last[1], last[2]};
-        traj.yaw = 0.0;
-        trajectory_setpoint_pub_->publish(traj);
-        counter_++;
-        return;
-    }
-
-    // If not currently holding, start a hold for the current waypoint.
-    // For waypoint 0 use 500 seconds; otherwise use 5 seconds.
-    if (!holding_) {
-        holding_ = true;
-        hold_counter_ = 0;
-        // 100 ms timer => 10 ticks per second
-        if (waypoint_index_ == 0) {
-            hold_duration_ticks_ = 50 * 10; // 500 s
-        } else {
-            hold_duration_ticks_ = 20 * 10;   // 5 s
-        }
-    }
-
-    // Always publish the current waypoint while holding
-    auto wp = waypoints_[waypoint_index_];
-    px4_msgs::msg::TrajectorySetpoint traj{};
-    traj.position = { wp[0], wp[1], wp[2] };
-    traj.yaw = 0.0;
-    trajectory_setpoint_pub_->publish(traj);
-
-    // Count hold ticks
-    hold_counter_++;
-
-    // If hold finished, move to next waypoint (if any) and reset holding state
-    if (hold_counter_ >= hold_duration_ticks_) {
-        holding_ = false;
-        hold_counter_ = 0;
-        hold_duration_ticks_ = 0;
-
-        // advance to next waypoint if available
-        if (waypoint_index_ < waypoints_.size() - 1) {
-            waypoint_index_++;
-            // Next waypoint will start its hold at the top of the next timer tick
-        } else {
-            // reached final waypoint: we will keep publishing it (see top)
-            waypoint_index_ = waypoints_.size(); // mark finished
-        }
-    }
-
-    counter_++;
 }
 
+void Drone1Control::arm() {
+    px4_msgs::msg::VehicleCommand arm_msg{};
+    arm_msg.param1 = 1.0;  // arm
+    arm_msg.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM;
+    arm_msg.target_system = 2;     
+    arm_msg.target_component = 1;
+    arm_msg.source_system = 2;
+    arm_msg.source_component = 1;
+    vehicle_command_pub_->publish(arm_msg);
+    // RCLCPP_INFO(this->get_logger(), "Arm command sent");
+}
 
-    void arm() {
-        px4_msgs::msg::VehicleCommand cmd{};
-        cmd.param1 = 1.0;  // arm
-        cmd.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM;
-        cmd.target_system = 2;     
-        cmd.target_component = 1;
-        cmd.source_system = 2;
-        cmd.source_component = 1;
-        vehicle_command_pub_->publish(cmd);
-        RCLCPP_INFO(this->get_logger(), "Arm command sent");
-    }
-
-    void set_offboard_mode() {
-        px4_msgs::msg::VehicleCommand cmd{};
-        cmd.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
-        cmd.param1 = 1.0;  // custom
-        cmd.param2 = 6.0;  // offboard
-        cmd.target_system = 2;
-        cmd.target_component = 1;
-        cmd.source_system = 2;
-        cmd.source_component = 1;
-        vehicle_command_pub_->publish(cmd);
-        RCLCPP_INFO(this->get_logger(), "Offboard mode command sent");
-    }
-
-    rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
-    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
-    rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_pub_;
-    rclcpp::TimerBase::SharedPtr timer_;
-
-    int counter_;
-    size_t waypoint_index_;
-    std::vector<std::array<float, 3>> waypoints_;
-    bool holding_ = false;
-    int hold_counter_ = 0;
-    int hold_duration_ticks_ = 0; 
-};
+void Drone1Control::set_offboard_mode() {
+    px4_msgs::msg::VehicleCommand vehicle_mode_msg{};
+    vehicle_mode_msg.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
+    vehicle_mode_msg.param1 = 1.0;  // custom
+    vehicle_mode_msg.param2 = 6.0;  // offboard
+    vehicle_mode_msg.target_system = 2;
+    vehicle_mode_msg.target_component = 1;
+    vehicle_mode_msg.source_system = 2;
+    vehicle_mode_msg.source_component = 1;
+    vehicle_command_pub_->publish(vehicle_mode_msg);
+    // RCLCPP_INFO(this->get_logger(), "Offboard mode command sent");
+}
 
 int main(int argc, char* argv[]) {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<SquareMission>());
+    rclcpp::spin(std::make_shared<Drone1Control>());
     rclcpp::shutdown();
     return 0;
 }
