@@ -42,7 +42,7 @@ private:
     // buat dapet orientasi dan kalkulasi rotational angle
     float current_yaw_{0.0};
     float current_z{0.0};
-    float target_z;
+    float target_z{0.0};
     Eigen::Matrix2f yaw_rotational_matrix;
     Eigen::Vector3f global_position;
     Eigen::Vector2f global_position_2d;
@@ -78,8 +78,8 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
     timer_ = create_wall_timer(100ms, std::bind(&Drone1Control::relative_setpoint, this));
     
     // JANGAN LUPA SET WAYPOINT NYA
-    body_pos_setpoint << 1.0f, 1.0f;
-    target_z = -1.0f;
+    body_pos_setpoint << 0.0f, 0.0f;
+    target_z = -2.0f;
     // body_vel_setpoint << 1.0f, 1.0f, 1.0f; 
 }
 
@@ -180,7 +180,7 @@ void Drone1Control::relative_setpoint(){
     // PUBLISHER_COUNT (traj. setpoint)
     px4_msgs::msg::TrajectorySetpoint traj{};
     traj.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-    traj.position = {target_pos[0], target_pos[1], current_z};
+    traj.position = {target_pos[0], target_pos[1], target_z};
     // traj.velocity = {body_vel_setpoint[0], body_vel_setpoint[1], body_vel_setpoint[2]};
     trajectory_setpoint_pub_->publish(traj);
 }
