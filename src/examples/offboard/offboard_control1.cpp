@@ -47,6 +47,7 @@ private:
     Eigen::Matrix2f yaw_rotational_matrix;
     Eigen::Matrix2f yaw_rot_matrix;
     Eigen::Vector2f target_pos;
+    float target_z;
 
     std::vector<Eigen::Vector3f> body_3dpos_setpoint;
     Eigen::Vector2f body_2dpos_setpoint;
@@ -59,6 +60,13 @@ private:
     bool initialized_pos{0};
     Eigen::Vector3f init_global_position_3d;
     Eigen::Vector2f init_global_position_2d;
+
+    bool check_if_done {true};
+
+    // hold timer variables
+    rclcpp::Time wp_reached_time_;
+    bool holding_ = false;
+    const double hold_duration_ = 5.0; // seconds
 
 };
 
@@ -89,10 +97,11 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
     
     // JANGAN LUPA SET WAYPOINT NYA
     body_3dpos_setpoint.reserve(20);
+    // kalo z = 0 berarti dia simply tidak climb (bukan berarti landing) 
     body_3dpos_setpoint.emplace_back(0.0f, 0.0f, -2.0f);
-    body_3dpos_setpoint.emplace_back(2.0f, 0.0f, -2.0f);
-    body_3dpos_setpoint.emplace_back(-3.0f, 0.0f, -2.0f);
-    body_3dpos_setpoint.emplace_back(1.0f, 0.0f, -2.0f);
+    body_3dpos_setpoint.emplace_back(2.0f, 0.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(-3.0f, 0.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(1.0f, 0.0f, 0.0f);
     body_3dpos_setpoint.emplace_back(5.0f, 0.0f, -2.0f);
 
     // body_3dpos_setpoint.emplace_back(2.0f, 0.0f, -2.0f);
@@ -165,15 +174,35 @@ void Drone1Control::odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPt
 
 void Drone1Control::trajectory_logic(){
     if (current_wp_idx_ >= body_3dpos_setpoint.size()) {
-        RCLCPP_INFO(this->get_logger(), "compltd");
+        if (check_if_done){
+        RCLCPP_INFO(this->get_logger(),
+            "MISSION COMPLETE | final position = [%.3f, %.3f, %.3f]",
+            global_position_3d.x(),
+            global_position_3d.y(),
+            global_position_3d.z());
+            check_if_done = false;
+        }
+        // RCLCPP_INFO(this->get_logger(), "compltd");
         return;
     }
     
     if(!initialized_pos){
-            // init_global_position_3d << global_position_3d[0], global_position_3d[1], global_position_3d[2];
-            init_global_position_3d = global_position_3d;
-            initialized_pos = true;
-            RCLCPP_INFO(this->get_logger(), "GANTI INIT_POS");
+        // init_global_position_3d << global_position_3d[0], global_position_3d[1], global_position_3d[2];
+        init_global_position_3d = global_position_3d;
+        initialized_pos = true;
+        
+        const auto &wp = body_3dpos_setpoint[current_wp_idx_];
+         RCLCPP_INFO(this->get_logger(),
+            "GANTI INIT_POS | WP %zu | body_wp = [%.2f, %.2f, %.2f] "
+            "| init = [%.3f, %.3f, %.3f] | current = [%.3f, %.3f, %.3f]",
+            current_wp_idx_,
+            wp.x(), wp.y(), wp.z(),
+            init_global_position_3d.x(),
+            init_global_position_3d.y(),
+            init_global_position_3d.z(),
+            global_position_3d.x(),
+            global_position_3d.y(),
+            global_position_3d.z());
     }
 
     // global_position_2d << global_position_3d.x(), global_position_3d.y();
@@ -183,25 +212,51 @@ void Drone1Control::trajectory_logic(){
     body_2dpos_setpoint << wp.x(), wp.y();
 
     target_pos = init_global_position_2d + (yaw_rotational_matrix * body_2dpos_setpoint);
+    
+    target_z = init_global_position_3d[2] + wp.z();
 
     // PUBLISHER_COUNT (traj. setpoint)
+    if (holding_) {
+        double elapsed = (this->get_clock()->now() - wp_reached_time_).seconds();
+
+        if (elapsed >= hold_duration_) {
+            RCLCPP_INFO(this->get_logger(),
+                 "Hold complete at waypoint %zu", current_wp_idx_);
+            current_wp_idx_++;
+            initialized_pos = false;
+            holding_ = false;
+        }
+
+        px4_msgs::msg::TrajectorySetpoint traj{};
+        traj.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        traj.position = {target_pos[0], target_pos[1], target_z};
+        // traj.velocity = {body_vel_setpoint[0], body_vel_setpoint[1], body_vel_setpoint[2]};
+        traj.yaw = current_yaw;
+        trajectory_setpoint_pub_->publish(traj);
+        return;
+    }
+    
+
+    if (waypoint_reached(target_pos)) {
+        RCLCPP_INFO(this->get_logger(), "Reached waypoint");
+        wp_reached_time_ = this->get_clock()->now();
+        holding_ = true;
+    }
     px4_msgs::msg::TrajectorySetpoint traj{};
     traj.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-    traj.position = {target_pos[0], target_pos[1], wp.z()};
-    // traj.velocity = {body_vel_setpoint[0], body_vel_setpoint[1], body_vel_setpoint[2]};
+    traj.position = {target_pos[0], target_pos[1], target_z};
     traj.yaw = current_yaw;
     trajectory_setpoint_pub_->publish(traj);
 
-    if (waypoint_reached(target_pos)) {
-        RCLCPP_INFO(this->get_logger(), "Reached waypoint %zu", current_wp_idx_);
-        current_wp_idx_++;
-        initialized_pos = false;
-    }
 }
 
 bool Drone1Control::waypoint_reached(const Eigen::Vector2f &target)
 {
-    return (global_position_2d - target).norm() < wp_reached_threshold_;
+    float distance_2d = (global_position_2d - target).norm();
+    float distance_z = std::abs(global_position_3d[2] - target_z);
+    
+    return (distance_2d < wp_reached_threshold_) && 
+           (distance_z < wp_reached_threshold_);
 }
 
 void Drone1Control::relative_setpoint(){
@@ -219,10 +274,21 @@ void Drone1Control::relative_setpoint(){
         setpoint_counter_++;
 
         if(!initialized_pos){
+            const auto &wp = body_3dpos_setpoint[current_wp_idx_];
             // init_global_position_3d << global_position_3d[0], global_position_3d[1], global_position_3d[2];
             init_global_position_3d = global_position_3d;
             initialized_pos = true;
-            RCLCPP_INFO(this->get_logger(), "GANTI INIT_POS");
+            RCLCPP_INFO(this->get_logger(),
+            "GANTI INIT_POS | WP %zu | body_wp = [%.2f, %.2f, %.2f] "
+            "| init = [%.3f, %.3f, %.3f] | current = [%.3f, %.3f, %.3f]",
+            current_wp_idx_,
+            wp.x(), wp.y(), wp.z(),
+            init_global_position_3d.x(),
+            init_global_position_3d.y(),
+            init_global_position_3d.z(),
+            global_position_3d.x(),
+            global_position_3d.y(),
+            global_position_3d.z());
         }
         return;
     }
