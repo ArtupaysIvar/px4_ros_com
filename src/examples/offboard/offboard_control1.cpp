@@ -106,7 +106,11 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
     body_3dpos_setpoint.emplace_back(2.0f, 0.0f, 0.0f);
     body_3dpos_setpoint.emplace_back(-3.0f, 0.0f, 0.0f);
     body_3dpos_setpoint.emplace_back(1.0f, 0.0f, 0.0f);
-    body_3dpos_setpoint.emplace_back(5.0f, 0.0f, -2.0f);
+    body_3dpos_setpoint.emplace_back(5.0f, 0.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(0.0f, 3.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(0.0f, 0.0f, 2.0f);
+
+
 
     // body_3dpos_setpoint.emplace_back(2.0f, 0.0f, -2.0f);
     // body_3dpos_setpoint.emplace_back(0.0f, 5.0f, -2.0f);
