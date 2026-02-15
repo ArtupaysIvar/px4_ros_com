@@ -21,6 +21,7 @@ private:
     void relative_setpoint();
     void trajectory_logic();
     bool waypoint_reached(const Eigen::Vector2f &target);
+    Eigen::Vector2f step_logic(const Eigen::Vector2f &current, const Eigen::Vector2f &target, float max_step);
 
     // kopi dari state machine
     enum class OffboardState {
@@ -66,8 +67,11 @@ private:
     // hold timer variables
     rclcpp::Time wp_reached_time_;
     bool holding_ = false;
-    const double hold_duration_ = 5.0; // seconds
+    const double hold_duration_ = 5.0; 
 
+    float max_step = 0.5f;
+
+    bool odom_received_ {false}; // supaya pasti ke inisialisasi
 };
 
 Drone1Control::Drone1Control(): Node("drone1_control_node") 
@@ -170,6 +174,8 @@ void Drone1Control::odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPt
     // global_position << odom_msg->position[0], odom_msg->position[1], odom_msg->position[2];
     global_position_3d << odom_msg->position[0], odom_msg->position[1], odom_msg->position[2];
     global_position_2d << odom_msg->position[0], odom_msg->position[1];
+
+    odom_received_ = true;
 }
 
 void Drone1Control::trajectory_logic(){
@@ -227,9 +233,11 @@ void Drone1Control::trajectory_logic(){
             holding_ = false;
         }
 
+        Eigen::Vector2f stepped_pos = step_logic(global_position_2d, target_pos, max_step);
+        
         px4_msgs::msg::TrajectorySetpoint traj{};
         traj.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-        traj.position = {target_pos[0], target_pos[1], target_z};
+        traj.position = {stepped_pos.x(), stepped_pos.y(), target_z};
         // traj.velocity = {body_vel_setpoint[0], body_vel_setpoint[1], body_vel_setpoint[2]};
         traj.yaw = current_yaw;
         trajectory_setpoint_pub_->publish(traj);
@@ -242,9 +250,11 @@ void Drone1Control::trajectory_logic(){
         wp_reached_time_ = this->get_clock()->now();
         holding_ = true;
     }
+    
+    Eigen::Vector2f stepped_pos = step_logic(global_position_2d, target_pos, max_step);
     px4_msgs::msg::TrajectorySetpoint traj{};
     traj.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-    traj.position = {target_pos[0], target_pos[1], target_z};
+    traj.position = {stepped_pos.x(), stepped_pos.y(), target_z};
     traj.yaw = current_yaw;
     trajectory_setpoint_pub_->publish(traj);
 
@@ -259,9 +269,31 @@ bool Drone1Control::waypoint_reached(const Eigen::Vector2f &target)
            (distance_z < wp_reached_threshold_);
 }
 
+Eigen::Vector2f Drone1Control::step_logic( // this one is to control velocity
+    const Eigen::Vector2f &current,
+    const Eigen::Vector2f &target,
+    float max_step)
+{
+    Eigen::Vector2f wp_disp = target - current;
+    float wp_dist = wp_disp.norm();
+
+    if (wp_dist <= max_step || wp_dist < 1e-3f)
+        return target;
+
+    return current + wp_disp.normalized() * max_step;
+}
+
+// function buat starting
 void Drone1Control::relative_setpoint(){
     
     if (setpoint_counter_ < 10) {
+        if (!odom_received_) {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(), *this->get_clock(), 2000,
+            "Waiting for vehicle_odometry...");
+        return;
+        }
+
         offboard_control_mode();
         px4_msgs::msg::TrajectorySetpoint traj{};
         traj.timestamp = this->get_clock()->now().nanoseconds() / 1000; 
@@ -278,6 +310,7 @@ void Drone1Control::relative_setpoint(){
             // init_global_position_3d << global_position_3d[0], global_position_3d[1], global_position_3d[2];
             init_global_position_3d = global_position_3d;
             initialized_pos = true;
+
             RCLCPP_INFO(this->get_logger(),
             "GANTI INIT_POS | WP %zu | body_wp = [%.2f, %.2f, %.2f] "
             "| init = [%.3f, %.3f, %.3f] | current = [%.3f, %.3f, %.3f]",

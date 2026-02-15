@@ -14,7 +14,10 @@ improvements:
 
 to do:
 1) implement dx/dt
-2) FIX BUG initial position null
+2) BUG: nggak ada hold in between waypoint 0 ke 1 (FIXED) 
+3) BUG: initial position drone null karna subscriber kosong (kinda FIXED?)
+4) benerin sistem logging nya 
+
 
 RUN 1:
 ravi@ArtupaysIvar:~/capstone-drone-project/ros2_ws$ ros2 run px4_ros_com offboard_control1
