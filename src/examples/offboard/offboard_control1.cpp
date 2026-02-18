@@ -23,15 +23,6 @@ private:
     bool waypoint_reached(const Eigen::Vector2f &target);
     Eigen::Vector2f step_logic(const Eigen::Vector2f &current, const Eigen::Vector2f &target, float max_step);
 
-    // kopi dari state machine
-    enum class OffboardState {
-    INIT,
-    OFFBOARD,
-    ARMED
-    };
-    OffboardState state_{OffboardState::INIT};
-    int setpoint_counter_{0};
-
     // publishers
     rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
     rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
@@ -40,6 +31,16 @@ private:
     // subscriber and timer
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr vehicle_odom_sub_;
+
+    // copy dari state machine
+    enum class OffboardState {
+    INIT,
+    OFFBOARD,
+    ARMED
+    };
+    OffboardState state_{OffboardState::INIT};
+    int setpoint_counter_{0};
+
 
     // buat dapet orientasi dan kalkulasi rotational angle
     float current_yaw{0.0};
@@ -77,24 +78,24 @@ private:
 Drone1Control::Drone1Control(): Node("drone1_control_node") 
 {
 
-    /*
+    
     offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
         "/px4_1/fmu/in/offboard_control_mode", 10);
     trajectory_setpoint_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
         "/px4_1/fmu/in/trajectory_setpoint", 10);
     vehicle_command_pub_ = create_publisher<px4_msgs::msg::VehicleCommand>(
         "/px4_1/fmu/in/vehicle_command", 10);
-    */
-
+    
+/*
     offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
         "/fmu/in/offboard_control_mode", 10);
     trajectory_setpoint_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
         "/fmu/in/trajectory_setpoint", 10);
     vehicle_command_pub_ = create_publisher<px4_msgs::msg::VehicleCommand>(
         "/fmu/in/vehicle_command", 10);
-
+*/
     vehicle_odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
-        "/fmu/out/vehicle_odometry", rclcpp::QoS(10).best_effort(),
+        "/px4_1/fmu/out/vehicle_odometry", rclcpp::QoS(10).best_effort(),
         std::bind(&Drone1Control::odom_callback, this, std::placeholders::_1));
 
     timer_ = create_wall_timer(100ms, std::bind(&Drone1Control::relative_setpoint, this));
@@ -125,7 +126,7 @@ void Drone1Control::arm() {
     arm_msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     arm_msg.param1 = 1.0;  // arm
     arm_msg.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM;
-    arm_msg.target_system = 1;     
+    arm_msg.target_system = 2;     
     arm_msg.target_component = 1;
     arm_msg.source_system = 1;
     arm_msg.source_component = 1;
@@ -140,7 +141,7 @@ void Drone1Control::set_offboard_command() {
     vehicle_mode_msg.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
     vehicle_mode_msg.param1 = 1.0;  // custom
     vehicle_mode_msg.param2 = 6.0;  // offboard
-    vehicle_mode_msg.target_system = 1;
+    vehicle_mode_msg.target_system = 2;
     vehicle_mode_msg.target_component = 1;
     vehicle_mode_msg.source_system = 1;
     vehicle_mode_msg.source_component = 1;
