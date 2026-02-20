@@ -27,8 +27,8 @@ private:
     rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
     rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
     rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_pub_;
-    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom1_sub_;
-    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom2_sub_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_lead_sub;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_own_sub;
     rclcpp::TimerBase::SharedPtr timer_;
 
     enum class OffboardState {
@@ -70,12 +70,12 @@ DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
             .best_effort()
             .durability_volatile();
 
-        odom1_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
+        odom_lead_sub = create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/px4_1/fmu/out/vehicle_odometry", 
             qos_profile,
             std::bind(&DistanceStepDrone2::odom_lead_callback, this, std::placeholders::_1));
 
-        odom2_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
+        odom_own_sub = create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/px4_2/fmu/out/vehicle_odometry", 
             qos_profile,
             std::bind(&DistanceStepDrone2::odom_own_callback, this, std::placeholders::_1));
@@ -94,7 +94,7 @@ DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
         if (!odom_received_) {
         RCLCPP_WARN_THROTTLE(
             this->get_logger(), *this->get_clock(), 2000,
-            "Waiting for vehicle_odometry...");
+            "Waiting for vehicle_odometry (drone 2)...");
         return;
         }
 
@@ -132,14 +132,14 @@ DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
     }
     
     if (state_ == OffboardState::INIT) {
-        RCLCPP_INFO(this->get_logger(), "Setting offboard mode...");
+        RCLCPP_INFO(this->get_logger(), "Setting offboard mode (drone 2)...");
         set_offboard_command();
         state_ = OffboardState::OFFBOARD;
         return;
     }
 
     if (state_ == OffboardState::OFFBOARD) {
-        RCLCPP_INFO(this->get_logger(), "Arming...");
+        RCLCPP_INFO(this->get_logger(), "Arming (drone 2)...");
         arm();
         state_ = OffboardState::ARMED;
         return;
@@ -173,7 +173,7 @@ void DistanceStepDrone2::arm()
     cmd.from_external = true;
     cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     vehicle_command_pub_->publish(cmd);
-    RCLCPP_INFO(this->get_logger(), "[ARM] Arm command sent to Drone 2");
+    RCLCPP_INFO(this->get_logger(), "Arm command sent (drone 2)");
 }
 
 void DistanceStepDrone2::set_offboard_command() {
@@ -188,7 +188,7 @@ void DistanceStepDrone2::set_offboard_command() {
     vehicle_mode_msg.source_system = 1;
     vehicle_mode_msg.source_component = 1;
     vehicle_command_pub_->publish(vehicle_mode_msg);
-    RCLCPP_INFO(this->get_logger(), "Offboard mode command sent");
+    RCLCPP_INFO(this->get_logger(), "Offboard mode command sent (drone 2)");
 }
 
     // func count 1

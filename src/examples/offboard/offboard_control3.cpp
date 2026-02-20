@@ -4,382 +4,244 @@
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <cmath>
+#include <Eigen/Dense>
+#include <Eigen/Geometry> 
+
 
 using namespace std::chrono_literals;
 
-struct displacement_based_control {
-    double u_x, u_y, u_z;
-    double x=0.0, y=0.0, z=0.0;
-    double x_lead=0.0, y_lead=0.0, z_lead=0.0;
-    double x_des=0.0, y_des=0.0, z_des=0.0;
-    double x_lead_des=0.0, y_lead_des=-4.0, z_lead_des=0.0;
-        
-    // void displacemen_algo() {
-    //     double u_x = -(x - x_lead) + (x_des - x_lead_des);
-    //     double u_y = -(y - y_lead) + (y_des - y_lead_des);
-    //     double u_z = -(z - z_lead) + (z_des - z_lead_des);
-    // }
-
-    displacement_based_control displacement_algo() {
-    displacement_based_control u;
- 
-    u.u_x = -(x - x_lead) + (x_des - x_lead_des);
-    u.u_y = -(y - y_lead) + (y_des - y_lead_des);
-    u.u_z = -(z - z_lead) + (z_des - z_lead_des);
-    return u;
-}
-};
-
-struct collecting_data {
-    int initial_samples_ = 0;
-    float initial_x_sum_ = 0.0f, initial_y_sum_ = 0.0f, initial_z_sum_ = 0.0f;
-    float initial_x_avg_ = 0.0f, initial_y_avg_ = 0.0f, initial_z_avg_ = 0.0f;
-
-    // Pass the values as parameters
-    void collect_initial_position(double x, double y, double z) {
-        if (initial_samples_ == 0 || (std::abs(x) > 0.01f || std::abs(y) > 0.01f)) {
-            initial_x_sum_ += x;
-            initial_y_sum_ += y;
-            initial_z_sum_ += z;
-            initial_samples_++;
-        }
-    }
-
-    // Pass logger and bool flag as parameters
-    void finalize_initial_position(rclcpp::Logger logger, bool& collecting_flag) {
-        if (initial_samples_ > 0) {
-            initial_x_avg_ = initial_x_sum_ / initial_samples_;
-            initial_y_avg_ = initial_y_sum_ / initial_samples_;
-            initial_z_avg_ = -3.0f;
-            collecting_flag = false;
-            
-            RCLCPP_INFO(logger, 
-                "[INIT] Initial position: x=%.2f, y=%.2f, z=%.2f (samples: %d)", 
-                initial_x_avg_, initial_y_avg_, initial_z_avg_, initial_samples_);
-        }
-    }
-};
-
-
-class DistanceStepDrone3 : public rclcpp::Node
+class DistanceStepDrone2 : public rclcpp::Node
 {
 public:
-    DistanceStepDrone3() : Node("distance_step_drone3")
-    {
-        offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
-            "/px4_3/fmu/in/offboard_control_mode", 10);
-        trajectory_setpoint_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
-            "/px4_3/fmu/in/trajectory_setpoint", 10);
-        vehicle_command_pub_ = create_publisher<px4_msgs::msg::VehicleCommand>(
-            "/px4_3/fmu/in/vehicle_command", 10);
-
-        // Subscribers for drone odometry with RELIABLE QoS (matching PX4 publisher)
-        auto qos_profile = rclcpp::QoS(rclcpp::KeepLast(10))
-            .best_effort()
-            .durability_volatile();
-
-        odom_lead_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
-            "/px4_2/fmu/out/vehicle_odometry", 
-            qos_profile,
-            std::bind(&DistanceStepDrone3::odom_lead_callback, this, std::placeholders::_1));
-
-        odom_own_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
-            "/px4_3/fmu/out/vehicle_odometry", 
-            qos_profile,
-            std::bind(&DistanceStepDrone3::odom_own_callback, this, std::placeholders::_1));
-
-        // Timer to send setpoints periodically
-        timer_ = create_wall_timer(100ms, std::bind(&DistanceStepDrone3::publish_setpoints, this));
-        
-        counter_ = 0;
-        collecting_initial_pos_ = true;
-        initial_samples_ = 0;
-    }
-
+    DistanceStepDrone2();
 private:
-    void publish_setpoints()
-    {
-        // Always publish offboard control mode first
-        px4_msgs::msg::OffboardControlMode offboard_msg{};
-        offboard_msg.position = true;
-        offboard_msg.velocity = false;
-        offboard_msg.acceleration = false;
-        offboard_msg.attitude = false;
-        offboard_msg.body_rate = false;
-        offboard_msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-        offboard_control_mode_pub_->publish(offboard_msg);
-
-        // Phase 1: Collect initial position (first 50 cycles = 5 seconds)
-        if (counter_ < 50 && collecting_initial_pos_) {
-            setpoint_x_ = dbc_.x;       // use struct follower's current x
-            setpoint_y_ = dbc_.y;
-            setpoint_z_ = dbc_.z;
-            
-            collecting_data_.collect_initial_position(dbc_.x, dbc_.y, dbc_.z);
-
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
-                "[INIT] Collecting initial position... %d/50", counter_);
-        }
-        // Phase 2: Arm and set offboard mode
-        else if (counter_ == 50) {
-            collecting_data_.finalize_initial_position(this->get_logger(), collecting_initial_pos_);
-            arm();
-            set_offboard_mode();
-        }
-        // Phase 3: Wait after arming (next 30 cycles = 3 seconds)
-        else if (counter_ < 80) {
-            setpoint_x_ = collecting_data_.initial_x_avg_;
-            setpoint_y_ = collecting_data_.initial_y_avg_;
-            setpoint_z_ = collecting_data_.initial_z_avg_;
-            
-            if (counter_ == 79) {
-                RCLCPP_INFO(this->get_logger(), "[READY] Starting distance-step control algorithm...");
-                // Initialize previous setpoint for the algorithm
-                prev_setpoint_x_ = setpoint_x_;
-                prev_setpoint_y_ = setpoint_y_;
-                prev_setpoint_z_ = setpoint_z_;
-            }
-        }
-        // Phase 4: Normal control - send current setpoint (algorithm may update elsewhere)
-        else {
-            // call algorithm update when both odoms are present and drone is roughly at safe altitude
-            if (drone_lead_data_received_ && dbc_.z <= -2.5) {
-                apply_distance_step_algorithm();
-            } else {
-                // hold previous setpoint
-                setpoint_x_ = prev_setpoint_x_;
-                setpoint_y_ = prev_setpoint_y_;
-                setpoint_z_ = prev_setpoint_z_;
-
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                    "[WAIT] Holding until Drone 2 reaches safe altitude (z=-3m). Current z=%.2f",
-                    dbc_.z);
-            }
-        }
-
-        // Send position setpoint
-        px4_msgs::msg::TrajectorySetpoint traj{};
-        traj.position = {setpoint_x_, setpoint_y_, setpoint_z_};
-        traj.yaw = 0.0f;  // Face forward like drone 1
-        traj.timestamp = this->get_clock()->now().nanoseconds() / 1000;
-        trajectory_setpoint_pub_->publish(traj);
-
-        counter_++;
-    }
-
-
-    void apply_distance_step_algorithm()
-    {
-        // Check odometry
-        if (!drone_own_data_received_) {
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
-                "[WARNING] Waiting for Drone 1 odometry data. Check if Drone 1 is running!");
-            setpoint_x_ = prev_setpoint_x_;
-            setpoint_y_ = prev_setpoint_y_;
-            setpoint_z_ = prev_setpoint_z_;
-            return;
-        }
-        if (!drone_lead_data_received_) {
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
-                "[WARNING] Waiting for Drone 2 odometry data");
-            setpoint_x_ = prev_setpoint_x_;
-            setpoint_y_ = prev_setpoint_y_;
-            setpoint_z_ = prev_setpoint_z_;
-            return;
-        }
-
-        auto u = dbc_.displacement_algo();
-
-        setpoint_x_ = prev_setpoint_x_ + u.u_x * step_gain_;
-        setpoint_y_ = prev_setpoint_y_ + u.u_y * step_gain_;
-        setpoint_z_ = prev_setpoint_z_ + u.u_z * step_gain_;
-        
-        prev_setpoint_x_ = setpoint_x_;
-        prev_setpoint_y_ = setpoint_y_;
-        prev_setpoint_z_ = setpoint_z_;
-    }
-    
-    void odom_own_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
-    {
-        dbc_.x = msg->position[0];
-        dbc_.y = msg->position[1];
-        dbc_.z = msg->position[2];
-        
-        if (!drone_own_data_received_) {
-            drone_own_data_received_ = true;
-            RCLCPP_INFO(this->get_logger(), "[SUCCESS] Drone 1 odometry data received!");
-        }
-        
-        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-            "[ODOM1] Drone 1 position: [%.2f, %.2f, %.2f]", 
-            dbc_.x_lead, dbc_.y_lead, dbc_.z_lead);
-    }
-
-    void odom_lead_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
-    {
-        dbc_.x_lead = msg->position[0];
-        dbc_.y_lead = msg->position[1];
-        dbc_.z_lead = msg->position[2];
-        
-        if (!drone_lead_data_received_) {
-            drone_lead_data_received_ = true;
-            RCLCPP_INFO(this->get_logger(), "[SUCCESS] Drone 2 odometry data received!");
-        }
-        
-        // Calculate yaw from quaternion
-        float q0 = msg->q[0], q1 = msg->q[1], q2 = msg->q[2], q3 = msg->q[3];
-        current_yaw_ = std::atan2(2.0f * (q0 * q3 + q1 * q2),
-                                  1.0f - 2.0f * (q2 * q2 + q3 * q3));
-        
-        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-            "[ODOM2] Drone 2 position: [%.2f, %.2f, %.2f]", 
-            dbc_.x, dbc_.y, dbc_.z);
-    }
-
-    void arm() {
-        px4_msgs::msg::VehicleCommand cmd{};
-        cmd.param1 = 1.0;  // arm
-        cmd.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM;
-        cmd.target_system = 4;      // Drone 3
-        cmd.target_component = 1;
-        cmd.source_system = 2;
-        cmd.source_component = 1;
-        vehicle_command_pub_->publish(cmd);
-    }
-
-    void set_offboard_mode() {
-        px4_msgs::msg::VehicleCommand cmd{};
-        cmd.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
-        cmd.param1 = 1.0;  // custom
-        cmd.param2 = 6.0;  // offboard
-        cmd.target_system = 4;
-        cmd.target_component = 1;
-        cmd.source_system = 2;
-        cmd.source_component = 1;
-        vehicle_command_pub_->publish(cmd);
-    }
+    void relative_setpoint();
+    void trajectory_logic();
+    void odom_lead_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr lead_odom_msg);
+    void odom_own_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr own_odom_msg);
+    void offboard_control_mode();
+    void arm();
+    void set_offboard_command();
 
     // Publishers and subscribers
     rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
     rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
     rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_pub_;
-    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_own_sub_;
-    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_lead_sub_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_own_sub;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_lead_sub;
     rclcpp::TimerBase::SharedPtr timer_;
 
-    displacement_based_control dbc_;
-    collecting_data collecting_data_;
-    
-    int counter_ = 0;
-    bool collecting_initial_pos_;
-    int initial_samples_ = 0;    
-    bool drone_own_data_received_= false;
-    bool drone_lead_data_received_ = false;
-    
-    float step_gain_ = 0.01;
-    float prev_setpoint_x_, prev_setpoint_y_, prev_setpoint_z_;
-    float setpoint_x_, setpoint_y_, setpoint_z_;
-    float current_yaw_;
+    enum class OffboardState {
+    INIT,
+    OFFBOARD,
+    ARMED
+    };
+    OffboardState state_{OffboardState::INIT};
+    int setpoint_counter_{0};
+    bool odom_received_ = false;
 
+    Eigen::Vector2f target_pos;
+    Eigen::Vector2f u_lead;
     
+    Eigen::Vector3f lead_global_pos_3d;
+    Eigen::Vector3f global_pos_3d;
+    Eigen::Vector2f lead_global_pos_2d;
+    Eigen::Vector2f global_pos_2d;
+
+    Eigen::Vector3f global_des_3d;
+    Eigen::Vector3f lead_global_des_3d;
+
+    Eigen::Vector3f input_pos_3d;
+    Eigen::Vector3f target_pos_3d;
+    const float step_gain{0.5f};
 };
+
+
+DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
+    {
+        offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
+            "/px4_3/fmu/in/offboard_control_mode", 10);
+        trajectory_setpoint_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
+            "/px4_3/fmu/in/trajectory_setpoint", 10);
+        vehicle_command_pub_ = create_publisher<px4_msgs::msg::VehicleCommand>(
+            "/px4_3/fmu/in/vehicle_command", 10);
+
+        auto qos_profile = rclcpp::QoS(rclcpp::KeepLast(10))
+            .best_effort()
+            .durability_volatile();
+
+        odom_own_sub = create_subscription<px4_msgs::msg::VehicleOdometry>(
+            "/px4_3/fmu/out/vehicle_odometry", 
+            qos_profile,
+            std::bind(&DistanceStepDrone2::odom_lead_callback, this, std::placeholders::_1));
+
+        // ikutin drone 2
+        odom_lead_sub = create_subscription<px4_msgs::msg::VehicleOdometry>(
+            "/px4_2/fmu/out/vehicle_odometry", 
+            qos_profile,
+            std::bind(&DistanceStepDrone2::odom_own_callback, this, std::placeholders::_1));
+
+        // Timer to send setpoints periodically
+        timer_ = create_wall_timer(100ms, std::bind(&DistanceStepDrone2::relative_setpoint, this));
+        
+        global_des_3d << 0.0f, -10.0f, 0.0f;
+        lead_global_des_3d << 0.0f, 0.0f, 0.0f;
+        
+    }
+
+    void DistanceStepDrone2::relative_setpoint(){
+    
+    if (setpoint_counter_ < 10) {
+        if (!odom_received_) {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(), *this->get_clock(), 2000,
+            "Waiting for vehicle_odometry (drone 3)...");
+        return;
+        }
+
+        offboard_control_mode();
+        px4_msgs::msg::TrajectorySetpoint traj{};
+        traj.timestamp = this->get_clock()->now().nanoseconds() / 1000; 
+        traj.position = {
+            global_pos_3d[0],
+            global_pos_3d[1],
+            global_pos_3d[2]};
+        // traj.yaw = current_yaw;
+        trajectory_setpoint_pub_->publish(traj);
+        setpoint_counter_++;
+        /*
+        if(!initialized_pos){
+            const auto &wp = body_3dpos_setpoint[current_wp_idx_];
+            // init_global_position_3d << global_position_3d[0], global_position_3d[1], global_position_3d[2];
+            init_global_position_3d = global_position_3d;
+            initialized_pos = true;
+
+            RCLCPP_INFO(this->get_logger(),
+            "GANTI INIT_POS | WP %zu | body_wp = [%.2f, %.2f, %.2f] "
+            "| init = [%.3f, %.3f, %.3f] | current = [%.3f, %.3f, %.3f]",
+            current_wp_idx_,
+            wp.x(), wp.y(), wp.z(),
+            init_global_position_3d.x(),
+            init_global_position_3d.y(),
+            init_global_position_3d.z(),
+            global_position_3d.x(),
+            global_position_3d.y(),
+            global_position_3d.z());
+        }
+        */
+        return;
+    }
+    
+    if (state_ == OffboardState::INIT) {
+        RCLCPP_INFO(this->get_logger(), "Setting offboard mode (drone 3)...");
+        set_offboard_command();
+        state_ = OffboardState::OFFBOARD;
+        return;
+    }
+
+    if (state_ == OffboardState::OFFBOARD) {
+        RCLCPP_INFO(this->get_logger(), "Arming (drone 3)...");
+        arm();
+        state_ = OffboardState::ARMED;
+        return;
+    }
+
+    // publish offboard_control_mode sama setpoint terus menerus
+    offboard_control_mode();
+    trajectory_logic();
+    }
+
+void DistanceStepDrone2::offboard_control_mode() {
+    // PUBLISHER_COUNT (offboard control)
+    px4_msgs::msg::OffboardControlMode offboard_msg{};
+    offboard_msg.position = true;
+    offboard_msg.velocity = false;
+    offboard_msg.acceleration = false;
+    offboard_msg.attitude = false;
+    offboard_msg.body_rate = false;
+    offboard_control_mode_pub_->publish(offboard_msg);
+    }
+    
+void DistanceStepDrone2::arm()
+    {
+    px4_msgs::msg::VehicleCommand cmd{};
+    cmd.param1 = 1.0; // arm
+    cmd.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM;
+    cmd.target_system = 4; // Drone 3
+    cmd.target_component = 1;
+    cmd.source_system = 2;
+    cmd.source_component = 1;
+    cmd.from_external = true;
+    cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+    vehicle_command_pub_->publish(cmd);
+    RCLCPP_INFO(this->get_logger(), "Arm command sent (drone 3)");
+}
+
+void DistanceStepDrone2::set_offboard_command() {
+    // PUBLISHER_COUNT (vehicle command :vehicle mode)
+    px4_msgs::msg::VehicleCommand vehicle_mode_msg{};
+    vehicle_mode_msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+    vehicle_mode_msg.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
+    vehicle_mode_msg.param1 = 1.0;  // custom
+    vehicle_mode_msg.param2 = 6.0;  // offboard
+    vehicle_mode_msg.target_system = 4; // Drone 3
+    vehicle_mode_msg.target_component = 1;
+    vehicle_mode_msg.source_system = 1;
+    vehicle_mode_msg.source_component = 1;
+    vehicle_command_pub_->publish(vehicle_mode_msg);
+    RCLCPP_INFO(this->get_logger(), "Offboard mode command sent (drone 3)");
+}
+
+    // func count 1
+void DistanceStepDrone2::trajectory_logic(){
+    input_pos_3d = -(global_pos_3d - lead_global_pos_3d) + (global_des_3d - lead_global_des_3d);
+    target_pos_3d = global_pos_3d + (input_pos_3d*step_gain);
+
+    px4_msgs::msg::TrajectorySetpoint traj{};
+        traj.timestamp = this->get_clock()->now().nanoseconds() / 1000; 
+        traj.position = {
+            target_pos_3d[0],
+            target_pos_3d[1],
+            target_pos_3d[2]};
+        trajectory_setpoint_pub_->publish(traj);    
+}
+
+void DistanceStepDrone2::odom_own_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr own_odom_msg)
+{
+    // float qw = odom_msg->q[0];
+    // float qx = odom_msg->q[1];
+    // float qy = odom_msg->q[2];
+    // float qz = odom_msg->q[3];
+
+    // current_yaw = std::atan2(
+    //     2.0f * (qw * qz + qx * qy),
+    //     1.0f - 2.0f * (qy * qy + qz * qz)
+    // );
+    /* ubah dari quaternion to yaw using:
+    yaw = atan2(2 * (q_w * q_z + q_x * q_y), 1 - 2 * (q_y^2 + q_z^2)) for
+    */
+    // yaw_rotational_matrix =  Eigen::Rotation2Df(current_yaw).toRotationMatrix();
+    // global_position << odom_msg->position[0], odom_msg->position[1], odom_msg->position[2];
+    global_pos_3d << own_odom_msg->position[0], own_odom_msg->position[1], own_odom_msg->position[2];
+    global_pos_2d << own_odom_msg->position[0], own_odom_msg->position[1];
+
+    odom_received_ = true;
+}
+
+void DistanceStepDrone2::odom_lead_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr lead_odom_msg)
+    {
+    lead_global_pos_3d << lead_odom_msg->position[0], lead_odom_msg->position[1], lead_odom_msg->position[2];
+    lead_global_pos_2d << lead_odom_msg->position[0], lead_odom_msg->position[1];
+    
+    // RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+    //     "[ODOM2] Drone 2 position: [%.2f, %.2f, %.2f], yaw: %.2f", 
+    //     dbc_.x_lead, dbc_.y_lead, dbc_.z_lead, current_yaw_);
+    }
 
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<DistanceStepDrone3>());
+    rclcpp::spin(std::make_shared<DistanceStepDrone2>());
     rclcpp::shutdown();
     return 0;
 }
-
-
-/* ----------------------------------------------------------------------------------------------
-#include <rclcpp/rclcpp.hpp>
-#include <px4_msgs/msg/offboard_control_mode.hpp>
-#include <px4_msgs/msg/trajectory_setpoint.hpp>
-#include <px4_msgs/msg/vehicle_command.hpp>
-
-using namespace std::chrono_literals;
-
-class SimpleTakeoff : public rclcpp::Node {
-public:
-    SimpleTakeoff() : Node("simple_takeoff_drone2") {
-        // Publishers for drone 2 namespace
-        offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
-            "/px4_3/fmu/in/offboard_control_mode", 10);
-
-        trajectory_setpoint_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
-            "/px4_3/fmu/in/trajectory_setpoint", 10);
-
-        vehicle_command_pub_ = create_publisher<px4_msgs::msg::VehicleCommand>(
-            "/px4_3/fmu/in/vehicle_command", 10);
-
-        // Timer to send setpoints periodically
-        timer_ = create_wall_timer(100ms, std::bind(&SimpleTakeoff::publish_setpoints, this));
-
-        counter_ = 0;
-    }
-
-private:
-    void publish_setpoints() {
-        // Always publish offboard control mode first
-        px4_msgs::msg::OffboardControlMode offboard_msg{};
-        offboard_msg.position = true;
-        offboard_msg.velocity = false;
-        offboard_msg.acceleration = false;
-        offboard_msg.attitude = false;
-        offboard_msg.body_rate = false;
-        offboard_control_mode_pub_->publish(offboard_msg);
-
-        // After some cycles, send arm + offboard request
-        if (counter_ == 10) {
-            arm();
-            set_offboard_mode();
-        }
-
-        // Send position setpoint (x=0, y=0, z=-3 → 3m above ground)
-        px4_msgs::msg::TrajectorySetpoint traj{};
-        traj.position = {0.0, 0.0, -3.0};  
-        traj.yaw = 0.0;
-        trajectory_setpoint_pub_->publish(traj);
-
-        counter_++;
-    }
-
-    void arm() {
-        px4_msgs::msg::VehicleCommand cmd{};
-        cmd.param1 = 1.0;  // arm
-        cmd.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM;
-        cmd.target_system = 4;      // Drone 3
-        cmd.target_component = 1;
-        cmd.source_system = 2;
-        cmd.source_component = 1;
-        vehicle_command_pub_->publish(cmd);
-    }
-
-    void set_offboard_mode() {
-        px4_msgs::msg::VehicleCommand cmd{};
-        cmd.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
-        cmd.param1 = 1.0;  // custom
-        cmd.param2 = 6.0;  // offboard
-        cmd.target_system = 4;
-        cmd.target_component = 1;
-        cmd.source_system = 2;
-        cmd.source_component = 1;
-        vehicle_command_pub_->publish(cmd);
-    }
-
-    rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
-    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
-    rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_pub_;
-    rclcpp::TimerBase::SharedPtr timer_;
-    int counter_;
-};
-
-int main(int argc, char* argv[]) {
-    rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<SimpleTakeoff>());
-    rclcpp::shutdown();
-    return 0;
-}
-    */

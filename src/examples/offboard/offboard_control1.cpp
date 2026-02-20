@@ -131,7 +131,7 @@ void Drone1Control::arm() {
     arm_msg.source_system = 1;
     arm_msg.source_component = 1;
     vehicle_command_pub_->publish(arm_msg);
-    RCLCPP_INFO(this->get_logger(), "Arm command sent");
+    RCLCPP_INFO(this->get_logger(), "Arm command sent (drone 1)");
 }
 
 void Drone1Control::set_offboard_command() {
@@ -146,7 +146,7 @@ void Drone1Control::set_offboard_command() {
     vehicle_mode_msg.source_system = 1;
     vehicle_mode_msg.source_component = 1;
     vehicle_command_pub_->publish(vehicle_mode_msg);
-    RCLCPP_INFO(this->get_logger(), "Offboard mode command sent");
+    RCLCPP_INFO(this->get_logger(), "Offboard mode command sent (drone 1)");
 }
 
 void Drone1Control::offboard_control_mode() {
@@ -295,7 +295,7 @@ void Drone1Control::relative_setpoint(){
         if (!odom_received_) {
         RCLCPP_WARN_THROTTLE(
             this->get_logger(), *this->get_clock(), 2000,
-            "Waiting for vehicle_odometry...");
+            "Waiting for vehicle_odometry (drone 1)...");
         return;
         }
 
@@ -332,14 +332,14 @@ void Drone1Control::relative_setpoint(){
     }
     
     if (state_ == OffboardState::INIT) {
-        RCLCPP_INFO(this->get_logger(), "Setting offboard mode...");
+        RCLCPP_INFO(this->get_logger(), "Setting offboard mode (drone 1)...");
         set_offboard_command();
         state_ = OffboardState::OFFBOARD;
         return;
     }
 
     if (state_ == OffboardState::OFFBOARD) {
-        RCLCPP_INFO(this->get_logger(), "Arming...");
+        RCLCPP_INFO(this->get_logger(), "Arming (drone 1)...");
         arm();
         state_ = OffboardState::ARMED;
         return;
