@@ -53,7 +53,7 @@ private:
 
     Eigen::Vector3f input_pos_3d;
     Eigen::Vector3f target_pos_3d;
-    const float step_gain{0.5f};
+    const float step_gain{0.2f};
 };
 
 
@@ -83,7 +83,7 @@ DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
         // Timer to send setpoints periodically
         timer_ = create_wall_timer(100ms, std::bind(&DistanceStepDrone2::relative_setpoint, this));
         
-        global_des_3d << 0.0f, -10.0f, 0.0f;
+        global_des_3d << 2.0f, -2.0f, 0.0f;
         lead_global_des_3d << 0.0f, 0.0f, 0.0f;
         
     }

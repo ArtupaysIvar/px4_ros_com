@@ -93,10 +93,19 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
         "/fmu/in/trajectory_setpoint", 10);
     vehicle_command_pub_ = create_publisher<px4_msgs::msg::VehicleCommand>(
         "/fmu/in/vehicle_command", 10);
-*/
+*/  
+    
+    auto qos_profile = rclcpp::QoS(rclcpp::KeepLast(10))
+            .best_effort()
+            .durability_volatile();
+
     vehicle_odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
-        "/px4_1/fmu/out/vehicle_odometry", rclcpp::QoS(10).best_effort(),
+        "/px4_1/fmu/out/vehicle_odometry", rclcpp::QoS(10).qos_profile,
         std::bind(&Drone1Control::odom_callback, this, std::placeholders::_1));
+
+    odom_follower_pub = create_subscription<px4_msgs::msg::VehicleOdometry>(
+        "/px4_3/fmu/out/vehicle_odometry", qos_profile,
+        std::bind(&Drone1Control::odom_lead_callback, this, std::placeholders::_1));
 
     timer_ = create_wall_timer(100ms, std::bind(&Drone1Control::relative_setpoint, this));
     

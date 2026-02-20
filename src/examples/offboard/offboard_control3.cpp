@@ -84,7 +84,7 @@ DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
         // Timer to send setpoints periodically
         timer_ = create_wall_timer(100ms, std::bind(&DistanceStepDrone2::relative_setpoint, this));
         
-        global_des_3d << 0.0f, -10.0f, 0.0f;
+        global_des_3d << 4.0f, 0.0f, 0.0f;
         lead_global_des_3d << 0.0f, 0.0f, 0.0f;
         
     }
