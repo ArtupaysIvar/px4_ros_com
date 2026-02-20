@@ -15,6 +15,7 @@ public:
 
 private:
     void odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg);
+    void odom_follower_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg);
     void offboard_control_mode();
     void arm();
     void set_offboard_command();
@@ -30,7 +31,9 @@ private:
     
     // subscriber and timer
     rclcpp::TimerBase::SharedPtr timer_;
-    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr vehicle_odom_sub_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_own_sub;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_follower_pub;
+
 
     // copy dari state machine
     enum class OffboardState {
@@ -55,6 +58,8 @@ private:
     Eigen::Vector2f body_2dpos_setpoint;
     Eigen::Vector3f global_position_3d;
     Eigen::Vector2f global_position_2d;
+
+    Eigen::Vector3f follower_odom;
 
     size_t current_wp_idx_{0};
     float wp_reached_threshold_{0.1f};
@@ -99,13 +104,13 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
             .best_effort()
             .durability_volatile();
 
-    vehicle_odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
-        "/px4_1/fmu/out/vehicle_odometry", rclcpp::QoS(10).qos_profile,
+    odom_own_sub = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
+        "/px4_1/fmu/out/vehicle_odometry", qos_profile,
         std::bind(&Drone1Control::odom_callback, this, std::placeholders::_1));
 
     odom_follower_pub = create_subscription<px4_msgs::msg::VehicleOdometry>(
         "/px4_3/fmu/out/vehicle_odometry", qos_profile,
-        std::bind(&Drone1Control::odom_lead_callback, this, std::placeholders::_1));
+        std::bind(&Drone1Control::odom_follower_callback, this, std::placeholders::_1));
 
     timer_ = create_wall_timer(100ms, std::bind(&Drone1Control::relative_setpoint, this));
     
@@ -168,6 +173,19 @@ void Drone1Control::offboard_control_mode() {
     offboard_msg.attitude = false;
     offboard_msg.body_rate = false;
     offboard_control_mode_pub_->publish(offboard_msg);
+}
+
+void Drone1Control::odom_follower_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg) {
+    // Store follower's odometry data for use in trajectory logic
+    drone3_z = odom_msg->position[2];
+    
+    if(!drone3_check){
+        init_drone3_z = drone3_z;
+        drone3_check = true;
+    }
+
+    follower_odom << odom_msg->position[0], odom_msg->position[1], odom_msg->position[2];
+
 }
 
 void Drone1Control::odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg)
@@ -238,6 +256,7 @@ void Drone1Control::trajectory_logic(){
     // PUBLISHER_COUNT (traj. setpoint)
     if (holding_) {
         double elapsed = (this->get_clock()->now() - wp_reached_time_).seconds();
+        if (follower_odom[2])
 
         if (elapsed >= hold_duration_) {
             RCLCPP_INFO(this->get_logger(),
