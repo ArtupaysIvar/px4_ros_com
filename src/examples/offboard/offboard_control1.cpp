@@ -75,6 +75,10 @@ private:
     bool holding_ = false;
     const double hold_duration_ = 5.0; 
 
+    float drone3_z;
+    float init_drone3_z;
+    bool drone3_check = false;
+
     float max_step = 0.5f;
 
     bool odom_received_ {false}; // supaya pasti ke inisialisasi
@@ -176,16 +180,13 @@ void Drone1Control::offboard_control_mode() {
 }
 
 void Drone1Control::odom_follower_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg) {
-    // Store follower's odometry data for use in trajectory logic
     drone3_z = odom_msg->position[2];
     
     if(!drone3_check){
         init_drone3_z = drone3_z;
         drone3_check = true;
     }
-
     follower_odom << odom_msg->position[0], odom_msg->position[1], odom_msg->position[2];
-
 }
 
 void Drone1Control::odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg)
@@ -253,11 +254,35 @@ void Drone1Control::trajectory_logic(){
     
     target_z = init_global_position_3d[2] + wp.z();
 
-    // PUBLISHER_COUNT (traj. setpoint)
+    // check if drone 3 has ascended
+    if (current_wp_idx_ == 1){
+        float target_drone3_z = init_drone3_z - 2.0f;
+        float tolerance = 0.1f;
+
+        bool drone3_ready =
+            drone3_check &&
+            std::abs(drone3_z - target_drone3_z) < tolerance;
+
+        if (!drone3_ready)
+        {
+            // hold current position
+            px4_msgs::msg::TrajectorySetpoint traj{};
+            traj.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+            traj.position = {
+                global_position_3d.x(),
+                global_position_3d.y(),
+                global_position_3d.z()
+            };
+            traj.yaw = current_yaw;
+            trajectory_setpoint_pub_->publish(traj);
+            return;
+        }
+}
+    // 5 sec hold in between wp logic
     if (holding_) {
         double elapsed = (this->get_clock()->now() - wp_reached_time_).seconds();
         if (follower_odom[2])
-
+        
         if (elapsed >= hold_duration_) {
             RCLCPP_INFO(this->get_logger(),
                  "Hold complete at waypoint %zu", current_wp_idx_);
