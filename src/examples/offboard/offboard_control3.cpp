@@ -54,6 +54,11 @@ private:
     Eigen::Vector3f input_pos_3d;
     Eigen::Vector3f target_pos_3d;
     const float step_gain{0.5f};
+
+    float current_yaw{0};
+
+    bool z_sync_phase{true};
+    float z_tolerance{0.3f};
 };
 
 
@@ -73,13 +78,13 @@ DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
         odom_own_sub = create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/px4_3/fmu/out/vehicle_odometry", 
             qos_profile,
-            std::bind(&DistanceStepDrone2::odom_lead_callback, this, std::placeholders::_1));
+            std::bind(&DistanceStepDrone2::odom_own_callback, this, std::placeholders::_1));
 
         // ikutin drone 2
         odom_lead_sub = create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/px4_2/fmu/out/vehicle_odometry", 
             qos_profile,
-            std::bind(&DistanceStepDrone2::odom_own_callback, this, std::placeholders::_1));
+            std::bind(&DistanceStepDrone2::odom_lead_callback, this, std::placeholders::_1));
 
         // Timer to send setpoints periodically
         timer_ = create_wall_timer(100ms, std::bind(&DistanceStepDrone2::relative_setpoint, this));
@@ -106,7 +111,7 @@ DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
             global_pos_3d[0],
             global_pos_3d[1],
             global_pos_3d[2]};
-        // traj.yaw = current_yaw;
+        traj.yaw = current_yaw;
         trajectory_setpoint_pub_->publish(traj);
         setpoint_counter_++;
         /*
@@ -197,26 +202,48 @@ void DistanceStepDrone2::trajectory_logic(){
     input_pos_3d = -(global_pos_3d - lead_global_pos_3d) + (global_des_3d - lead_global_des_3d);
     target_pos_3d = global_pos_3d + (input_pos_3d*step_gain);
 
+    //bedain logic pas takeoff
+    if(z_sync_phase){
+        px4_msgs::msg::TrajectorySetpoint traj{};
+        traj.timestamp = this->get_clock()->now().nanoseconds() / 1000; 
+        traj.position = {
+            global_pos_3d[0],
+            global_pos_3d[1],
+            target_pos_3d[2]};
+        traj.yaw = current_yaw;
+        trajectory_setpoint_pub_->publish(traj); 
+
+        float z_error = target_pos_3d[2] - global_pos_3d[2];
+        if (std::abs(z_error) < z_tolerance)
+        {
+            z_sync_phase = false;
+        }
+        return; 
+    }
+
+    if(!z_sync_phase){
     px4_msgs::msg::TrajectorySetpoint traj{};
         traj.timestamp = this->get_clock()->now().nanoseconds() / 1000; 
         traj.position = {
             target_pos_3d[0],
             target_pos_3d[1],
             target_pos_3d[2]};
-        trajectory_setpoint_pub_->publish(traj);    
+        traj.yaw = current_yaw;
+        trajectory_setpoint_pub_->publish(traj);  
+    }  
 }
 
 void DistanceStepDrone2::odom_own_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr own_odom_msg)
 {
-    // float qw = odom_msg->q[0];
-    // float qx = odom_msg->q[1];
-    // float qy = odom_msg->q[2];
-    // float qz = odom_msg->q[3];
+    float qw = own_odom_msg->q[0];
+    float qx = own_odom_msg->q[1];
+    float qy = own_odom_msg->q[2];
+    float qz = own_odom_msg->q[3];
 
-    // current_yaw = std::atan2(
-    //     2.0f * (qw * qz + qx * qy),
-    //     1.0f - 2.0f * (qy * qy + qz * qz)
-    // );
+    current_yaw = std::atan2(
+        2.0f * (qw * qz + qx * qy),
+        1.0f - 2.0f * (qy * qy + qz * qz)
+    );
     /* ubah dari quaternion to yaw using:
     yaw = atan2(2 * (q_w * q_z + q_x * q_y), 1 - 2 * (q_y^2 + q_z^2)) for
     */

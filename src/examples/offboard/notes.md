@@ -12,9 +12,10 @@ improvements on leader:
 6) initialized positions for every waypoint being done
 7) bikin timer to hold between waypoints
 8) implement dx/dt
+9) drone 1 nunggu drone 3 untuk take off
 
 improvements on follower:
-1) 
+1) fixed yaw nya
 
 to do:
 1) 

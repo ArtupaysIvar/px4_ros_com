@@ -32,7 +32,7 @@ private:
     // subscriber and timer
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_own_sub;
-    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_follower_pub;
+    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_follower_sub;
 
 
     // copy dari state machine
@@ -81,7 +81,8 @@ private:
 
     float max_step = 0.5f;
 
-    bool odom_received_ {false}; // supaya pasti ke inisialisasi
+    bool odom_received_ {false}; // supaya pasti ke 
+    float z_tolerance = 0.3f;
 };
 
 Drone1Control::Drone1Control(): Node("drone1_control_node") 
@@ -112,7 +113,7 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
         "/px4_1/fmu/out/vehicle_odometry", qos_profile,
         std::bind(&Drone1Control::odom_callback, this, std::placeholders::_1));
 
-    odom_follower_pub = create_subscription<px4_msgs::msg::VehicleOdometry>(
+    odom_follower_sub = create_subscription<px4_msgs::msg::VehicleOdometry>(
         "/px4_3/fmu/out/vehicle_odometry", qos_profile,
         std::bind(&Drone1Control::odom_follower_callback, this, std::placeholders::_1));
 
@@ -121,13 +122,13 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
     // JANGAN LUPA SET WAYPOINT NYA
     body_3dpos_setpoint.reserve(20);
     // kalo z = 0 berarti dia simply tidak climb (bukan berarti landing) 
-    body_3dpos_setpoint.emplace_back(0.0f, 0.0f, -2.0f);
+    body_3dpos_setpoint.emplace_back(0.0f, 0.0f, -5.0f);
     body_3dpos_setpoint.emplace_back(2.0f, 0.0f, 0.0f);
     body_3dpos_setpoint.emplace_back(-3.0f, 0.0f, 0.0f);
     body_3dpos_setpoint.emplace_back(1.0f, 0.0f, 0.0f);
     body_3dpos_setpoint.emplace_back(5.0f, 0.0f, 0.0f);
     body_3dpos_setpoint.emplace_back(0.0f, 3.0f, 0.0f);
-    body_3dpos_setpoint.emplace_back(0.0f, 0.0f, 2.0f);
+    body_3dpos_setpoint.emplace_back(0.0f, 0.0f, 5.0f);
 
 
 
@@ -256,12 +257,12 @@ void Drone1Control::trajectory_logic(){
 
     // check if drone 3 has ascended
     if (current_wp_idx_ == 1){
-        float target_drone3_z = init_drone3_z - 2.0f;
-        float tolerance = 0.1f;
-
+        // const auto &wp = body_3dpos_setpoint[current_wp_idx_];
+        float target_drone3_z = init_drone3_z - 5.0f;
+        
         bool drone3_ready =
             drone3_check &&
-            std::abs(drone3_z - target_drone3_z) < tolerance;
+            std::abs(drone3_z - target_drone3_z) < z_tolerance;
 
         if (!drone3_ready)
         {
@@ -281,7 +282,6 @@ void Drone1Control::trajectory_logic(){
     // 5 sec hold in between wp logic
     if (holding_) {
         double elapsed = (this->get_clock()->now() - wp_reached_time_).seconds();
-        if (follower_odom[2])
         
         if (elapsed >= hold_duration_) {
             RCLCPP_INFO(this->get_logger(),
