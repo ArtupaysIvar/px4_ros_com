@@ -69,19 +69,19 @@ install(TARGETS offboard_control DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/offboard_control1
 add_executable(offboard_control1 src/examples/offboard/offboard_control1.cpp)
-ament_target_dependencies(offboard_control1 rclcpp px4_msgs std_msgs Eigen3)
+ament_target_dependencies(offboard_control1 rclcpp px4_msgs std_msgs Eigen3 sensor_msgs)
 target_link_libraries(offboard_control1 Eigen3::Eigen)
 install(TARGETS offboard_control1 DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/offboard_control2
 add_executable(offboard_control2 src/examples/offboard/offboard_control2.cpp)
-ament_target_dependencies(offboard_control2 rclcpp px4_msgs std_msgs Eigen3)
+ament_target_dependencies(offboard_control2 rclcpp px4_msgs std_msgs Eigen3 sensor_msgs)
 target_link_libraries(offboard_control2 Eigen3::Eigen)
 install(TARGETS offboard_control2 DESTINATION lib/${PROJECT_NAME})
 
 # examples/offboard/offboard_control3
 add_executable(offboard_control3 src/examples/offboard/offboard_control3.cpp)
-ament_target_dependencies(offboard_control3 rclcpp px4_msgs std_msgs Eigen3)
+ament_target_dependencies(offboard_control3 rclcpp px4_msgs std_msgs Eigen3 sensor_msgs)
 target_link_libraries(offboard_control3 Eigen3::Eigen)
 install(TARGETS offboard_control3 DESTINATION lib/${PROJECT_NAME})
 

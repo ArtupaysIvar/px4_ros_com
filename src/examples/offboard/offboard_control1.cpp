@@ -3,7 +3,9 @@
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
-#include <px4_msgs/msg/vehicle_global_position.h>
+#include <px4_msgs/msg/vehicle_global_position.hpp>
+#include <sensor_msgs/msg/nav_sat_fix.hpp>
+#include <cmath>
 #include <vector>
 #include <Eigen/Dense>
 #include <Eigen/Geometry> 
@@ -16,7 +18,8 @@ public:
 
 private:
     void odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg);
-    void odom_follower_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg);
+    void gps_follower_callback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr gps_msg);
+    void gps_own_callback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr gps_msg);
     void offboard_control_mode();
     void arm();
     void set_offboard_command();
@@ -29,11 +32,13 @@ private:
     rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
     rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
     rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_pub_;
-    
+    rclcpp::Publisher<sensor_msgs::msg::NavSatFix>::SharedPtr origin_pub;
     // subscriber and timer
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_own_sub;
-    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_follower_sub;
+    rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr gps_own_sub;
+    rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr gps_follower_sub;
+    
 
 
     // copy dari state machine
@@ -51,7 +56,7 @@ private:
     // float current_z{0.0};
     // float target_z{0.0};
     Eigen::Matrix2f yaw_rotational_matrix;
-    Eigen::Matrix2f yaw_rot_matrix;
+    // Eigen::Matrix2f yaw_rot_matrix;
     Eigen::Vector2f target_pos;
     float target_z;
 
@@ -76,26 +81,37 @@ private:
     bool holding_ = false;
     const double hold_duration_ = 5.0; 
 
-    float drone3_z;
-    float init_drone3_z;
-    bool drone3_check = false;
+    float fol_alt{0};
+    float init_fol_alt{0};
+    bool fol_alt_check = false;
 
     float max_step = 0.5f;
 
-    bool odom_received_ {false}; // supaya pasti ke 
+    bool odom_received_ {false}; // supaya pasti ada isi data nya
     float z_tolerance = 0.3f;
+
+    bool origin_set = false;
+    // double own_lat{0}, own_lon{0}, own_alt{0};
+    // double fol_lat{0}, fol_lon{0}, fol_alt{0};
+    bool gps_own_received{false};
+    // bool gps_fol_received{false};
+
 };
 
 Drone1Control::Drone1Control(): Node("drone1_control_node") 
 {
-
-    
     offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
         "/px4_1/fmu/in/offboard_control_mode", 10);
     trajectory_setpoint_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
         "/px4_1/fmu/in/trajectory_setpoint", 10);
     vehicle_command_pub_ = create_publisher<px4_msgs::msg::VehicleCommand>(
         "/px4_1/fmu/in/vehicle_command", 10);
+    auto qos = rclcpp::QoS(1)
+                        .reliable()
+                        .transient_local();
+    origin_pub = this->create_publisher<sensor_msgs::msg::NavSatFix>(
+    "/swarm/global_origin", qos);
+
     
 /*
     offboard_control_mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>(
@@ -114,10 +130,14 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
         "/px4_1/fmu/out/vehicle_odometry", qos_profile,
         std::bind(&Drone1Control::odom_callback, this, std::placeholders::_1));
 
-    odom_follower_sub = create_subscription<px4_msgs::msg::VehicleOdometry>(
-        "/px4_3/fmu/out/vehicle_odometry", qos_profile,
-        std::bind(&Drone1Control::odom_follower_callback, this, std::placeholders::_1));
+    gps_own_sub = this->create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
+        "/px4_1/fmu/out/vehicle_global_position", qos_profile,
+        std::bind(&Drone1Control::gps_own_callback, this, std::placeholders::_1));
 
+    gps_follower_sub = create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
+        "/px4_3/fmu/out/vehicle_global_position", qos_profile,
+        std::bind(&Drone1Control::gps_follower_callback, this, std::placeholders::_1));
+    
     timer_ = create_wall_timer(100ms, std::bind(&Drone1Control::relative_setpoint, this));
     
     // JANGAN LUPA SET WAYPOINT NYA
@@ -130,14 +150,6 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
     body_3dpos_setpoint.emplace_back(5.0f, 0.0f, 0.0f);
     body_3dpos_setpoint.emplace_back(0.0f, 3.0f, 0.0f);
     body_3dpos_setpoint.emplace_back(0.0f, 0.0f, 5.0f);
-
-
-
-    // body_3dpos_setpoint.emplace_back(2.0f, 0.0f, -2.0f);
-    // body_3dpos_setpoint.emplace_back(0.0f, 5.0f, -2.0f);
-
-    // target_z = -2.0f;
-    // body_vel_setpoint << 1.0f, 1.0f, 1.0f; 
 }
 
 void Drone1Control::arm() {
@@ -181,14 +193,40 @@ void Drone1Control::offboard_control_mode() {
     offboard_control_mode_pub_->publish(offboard_msg);
 }
 
-void Drone1Control::odom_follower_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg) {
-    drone3_z = odom_msg->position[2];
+void Drone1Control::gps_own_callback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr gps_msg) {
+    if (!origin_set && gps_msg->lat_lon_valid && gps_msg->alt_valid)
+    {
+    double own_lat = gps_msg -> lat;
+    double own_lon = gps_msg -> lon;
+    double own_alt = gps_msg -> alt;
+    gps_own_received = true;
     
-    if(!drone3_check){
-        init_drone3_z = drone3_z;
-        drone3_check = true;
+    sensor_msgs::msg::NavSatFix msg{};
+    msg.latitude = own_lat;
+    msg.longitude = own_lon;
+    msg.altitude = own_alt;
+    origin_pub -> publish(msg);
+
+    RCLCPP_INFO(this->get_logger(),
+    "Swarm origin published: lat=%.8f lon=%.8f alt=%.2f",
+    own_lat, own_lon, own_alt);
+    
+    origin_set = true;
     }
-    follower_odom << odom_msg->position[0], odom_msg->position[1], odom_msg->position[2];
+    
+}
+
+void Drone1Control::gps_follower_callback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr gps_msg) {
+    fol_alt = static_cast<float>(gps_msg->alt);
+ 
+    // float down = static_cast<float>(-(alt - ref_alt));
+    if(!fol_alt_check){
+        init_fol_alt = fol_alt;
+        fol_alt_check = true;
+        RCLCPP_INFO(this->get_logger(),
+            "Drone 3 initial altitude recorded: %.2f m", init_fol_alt);
+    }
+    // follower_odom << odom_msg->position[0], odom_msg->position[1], odom_msg->position[2];
 }
 
 void Drone1Control::odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr odom_msg)
@@ -202,15 +240,16 @@ void Drone1Control::odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPt
         2.0f * (qw * qz + qx * qy),
         1.0f - 2.0f * (qy * qy + qz * qz)
     );
-    /* ubah dari quaternion to yaw using:
-    yaw = atan2(2 * (q_w * q_z + q_x * q_y), 1 - 2 * (q_y^2 + q_z^2)) for
-    */
-    yaw_rotational_matrix =  Eigen::Rotation2Df(current_yaw).toRotationMatrix();
-    // global_position << odom_msg->position[0], odom_msg->position[1], odom_msg->position[2];
+
+    yaw_rotational_matrix <<
+    std::cos(current_yaw), -std::sin(current_yaw),
+    std::sin(current_yaw),  std::cos(current_yaw);
+
     global_position_3d << odom_msg->position[0], odom_msg->position[1], odom_msg->position[2];
     global_position_2d << odom_msg->position[0], odom_msg->position[1];
 
     odom_received_ = true;
+
 }
 
 void Drone1Control::trajectory_logic(){
@@ -259,11 +298,12 @@ void Drone1Control::trajectory_logic(){
     // check if drone 3 has ascended
     if (current_wp_idx_ == 1){
         // const auto &wp = body_3dpos_setpoint[current_wp_idx_];
-        float target_drone3_z = init_drone3_z - 5.0f;
+        // harusnya ga hard-coded
+        float target_drone3_z = init_fol_alt + 5.0f;
         
         bool drone3_ready =
-            drone3_check &&
-            std::abs(drone3_z - target_drone3_z) < z_tolerance;
+            fol_alt_check &&
+            std::abs(fol_alt - target_drone3_z) < z_tolerance;
 
         if (!drone3_ready)
         {
@@ -344,7 +384,6 @@ Eigen::Vector2f Drone1Control::step_logic( // this one is to control velocity
 
 // function buat starting
 void Drone1Control::relative_setpoint(){
-    
     if (setpoint_counter_ < 10) {
         if (!odom_received_) {
         RCLCPP_WARN_THROTTLE(

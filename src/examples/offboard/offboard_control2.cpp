@@ -3,6 +3,8 @@
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <px4_msgs/msg/vehicle_global_position.hpp>
+#include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <cmath>
 #include <Eigen/Dense>
 #include <Eigen/Geometry> 
@@ -17,7 +19,12 @@ public:
 private:
     void relative_setpoint();
     void trajectory_logic();
-    void odom_lead_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr lead_odom_msg);
+    Eigen::Vector3f gps_to_ned(
+    double lat, double lon, double alt,
+    double ref_lat, double ref_lon, double ref_alt);
+    void origin_callback(const sensor_msgs::msg::NavSatFix::SharedPtr origin_msg);
+    void gps_own_callback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr gps_msg);
+    void gps_lead_callback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr gps_msg);
     void odom_own_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr own_odom_msg);
     void offboard_control_mode();
     void arm();
@@ -27,8 +34,10 @@ private:
     rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
     rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
     rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_pub_;
-    rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_lead_sub;
+    rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr odom_lead_sub_gps;
+    rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr odom_own_sub_gps;
     rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_own_sub;
+    rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr origin_sub;
     rclcpp::TimerBase::SharedPtr timer_;
 
     enum class OffboardState {
@@ -59,6 +68,18 @@ private:
 
     bool z_sync_phase{true};
     float z_tolerance{0.3f};
+
+    double own_lat{0}, own_lon{0}, own_alt{0};
+    double lead_lat{0}, lead_lon{0}, lead_alt{0};
+    bool gps_own_received{false};
+    bool gps_lead_received{false};
+
+    double ref_lat{0}, ref_lon{0}, ref_alt{0};
+    bool ref_set_{false};
+
+    Eigen::Vector3f px4_setpoint_origin{Eigen::Vector3f::Zero()};
+    Eigen::Vector3f px4_target{Eigen::Vector3f::Zero()};
+
 };
 
 
@@ -75,23 +96,102 @@ DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
             .best_effort()
             .durability_volatile();
 
-        odom_lead_sub = create_subscription<px4_msgs::msg::VehicleOdometry>(
-            "/px4_1/fmu/out/vehicle_odometry", 
+        odom_lead_sub_gps = create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
+            "/px4_1/fmu/out/vehicle_global_position", 
             qos_profile,
-            std::bind(&DistanceStepDrone2::odom_lead_callback, this, std::placeholders::_1));
+            std::bind(&DistanceStepDrone2::gps_lead_callback, this, std::placeholders::_1));
+        
+        odom_own_sub_gps = create_subscription<px4_msgs::msg::VehicleGlobalPosition>(
+            "/px4_2/fmu/out/vehicle_global_position", 
+            qos_profile,
+            std::bind(&DistanceStepDrone2::gps_own_callback, this, std::placeholders::_1));
 
         odom_own_sub = create_subscription<px4_msgs::msg::VehicleOdometry>(
             "/px4_2/fmu/out/vehicle_odometry", 
             qos_profile,
             std::bind(&DistanceStepDrone2::odom_own_callback, this, std::placeholders::_1));
+        
+        auto origin_qos = rclcpp::QoS(1)
+                    .reliable()
+                    .transient_local();
+
+        origin_sub = this->create_subscription<sensor_msgs::msg::NavSatFix>(
+            "/swarm/global_origin", origin_qos,
+            std::bind(&DistanceStepDrone2::origin_callback, this, std::placeholders::_1));
 
         // Timer to send setpoints periodically
         timer_ = create_wall_timer(100ms, std::bind(&DistanceStepDrone2::relative_setpoint, this));
         
         global_des_3d << -2.0f, -2.0f, 0.0f;
         lead_global_des_3d << 0.0f, 0.0f, 0.0f;
-        
     }
+
+Eigen::Vector3f DistanceStepDrone2::gps_to_ned(
+    double lat, double lon, double alt,
+    double ref_lat, double ref_lon, double ref_alt)
+{
+    const double R = 6371000.0; // earth radius meters
+    float north = static_cast<float>((lat - ref_lat) * (M_PI/180.0) * R);
+    float east  = static_cast<float>((lon - ref_lon) * (M_PI/180.0) * R * std::cos(ref_lat * M_PI/180.0));
+    float down  = static_cast<float>(-(alt - ref_alt));
+    return {north, east, down};
+}
+
+void DistanceStepDrone2::origin_callback(const sensor_msgs::msg::NavSatFix::SharedPtr origin_msg)
+{
+    if(!ref_set_){
+    ref_lat = origin_msg -> latitude;
+    ref_lon = origin_msg -> longitude;
+    ref_alt = origin_msg -> altitude;
+
+    RCLCPP_INFO(this->get_logger(),
+    "Received swarm origin: lat=%.8f lon=%.8f alt=%.2f",
+    ref_lat, ref_lon, ref_alt);
+
+    ref_set_ = true;}
+    else return;
+}
+
+void DistanceStepDrone2::gps_own_callback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr gps_msg)
+{
+    if (!gps_msg->lat_lon_valid || !gps_msg->alt_valid)return;
+    own_lat = gps_msg -> lat;
+    own_lon = gps_msg -> lon;
+    own_alt = gps_msg -> alt;
+    
+    if (!ref_set_) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+            "Own GPS received but NED reference not set yet, waiting for drone 1 GPS...");
+        return;
+    }
+    global_pos_3d = gps_to_ned(own_lat, own_lon, own_alt,
+                                ref_lat, ref_lon, ref_alt);
+    gps_own_received = true;
+
+    RCLCPP_DEBUG(this->get_logger(),
+        "Own NED: [%.3f, %.3f, %.3f]",
+        global_pos_3d.x(), global_pos_3d.y(), global_pos_3d.z());
+}
+void DistanceStepDrone2::gps_lead_callback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr gps_msg)
+{
+    if (!gps_msg->lat_lon_valid || !gps_msg->alt_valid)return;
+    lead_lat = gps_msg -> lat;
+    lead_lon = gps_msg -> lon;
+    lead_alt = gps_msg -> alt;
+
+    if (!ref_set_) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+            "Own GPS received but NED reference not set yet, waiting for drone 1 GPS...");
+        return;
+    }
+    lead_global_pos_3d = gps_to_ned(lead_lat, lead_lon, lead_alt,
+                                     ref_lat,  ref_lon,  ref_alt);
+    gps_lead_received = true;
+
+    RCLCPP_DEBUG(this->get_logger(),
+        "Lead NED: [%.3f, %.3f, %.3f]",
+        lead_global_pos_3d.x(), lead_global_pos_3d.y(), lead_global_pos_3d.z());
+}
 
     void DistanceStepDrone2::relative_setpoint(){
     
@@ -103,16 +203,23 @@ DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
         return;
         }
 
-        offboard_control_mode();
-        px4_msgs::msg::TrajectorySetpoint traj{};
-        traj.timestamp = this->get_clock()->now().nanoseconds() / 1000; 
-        traj.position = {
-            global_pos_3d[0],
-            global_pos_3d[1],
-            global_pos_3d[2]};
-        traj.yaw = current_yaw;
-        trajectory_setpoint_pub_->publish(traj);
-        setpoint_counter_++;
+    if (!gps_own_received || !gps_lead_received) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                "Waiting for GPS (own=%d lead=%d)...",
+                gps_own_received, gps_lead_received);
+            return;
+        }
+
+    offboard_control_mode();
+    px4_msgs::msg::TrajectorySetpoint traj{};
+    traj.timestamp = this->get_clock()->now().nanoseconds() / 1000; 
+    traj.position = {
+        px4_setpoint_origin[0],
+        px4_setpoint_origin[1],
+        px4_setpoint_origin[2]};
+    traj.yaw = current_yaw;
+    trajectory_setpoint_pub_->publish(traj);
+    setpoint_counter_++;
         /*
         if(!initialized_pos){
             const auto &wp = body_3dpos_setpoint[current_wp_idx_];
@@ -195,24 +302,49 @@ void DistanceStepDrone2::set_offboard_command() {
     vehicle_command_pub_->publish(vehicle_mode_msg);
     RCLCPP_INFO(this->get_logger(), "Offboard mode command sent (drone 2)");
 }
-
     // func count 1
 void DistanceStepDrone2::trajectory_logic(){
+    if (!gps_own_received || !gps_lead_received) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+            "Waiting for GPS positions (own=%d lead=%d)...",
+            gps_own_received, gps_lead_received);
+        return;
+    }
+
     input_pos_3d = -(global_pos_3d - lead_global_pos_3d) + (global_des_3d - lead_global_des_3d);
     target_pos_3d = global_pos_3d + (input_pos_3d*step_gain);
-
+    px4_target = px4_setpoint_origin + (input_pos_3d*step_gain);
 
     //bedain logic pas takeoff
     if(z_sync_phase){
         px4_msgs::msg::TrajectorySetpoint traj{};
         traj.timestamp = this->get_clock()->now().nanoseconds() / 1000; 
         traj.position = {
-            global_pos_3d[0],
-            global_pos_3d[1],
-            target_pos_3d[2]};
+            px4_setpoint_origin[0],
+            px4_setpoint_origin[1],
+            px4_target[2]};
         traj.yaw = current_yaw;
         trajectory_setpoint_pub_->publish(traj); 
-        float z_error = target_pos_3d[2] - global_pos_3d[2];
+        Eigen::Vector3f actual_offset  = global_pos_3d - lead_global_pos_3d;
+        Eigen::Vector3f desired_offset = global_des_3d - lead_global_des_3d;
+        Eigen::Vector3f offset_error   = actual_offset - desired_offset;
+
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+            "\n--- CONVERGENCE CHECK (GPS/NED) ---"
+            "\n  own  pos (NED) : [%.3f, %.3f, %.3f]"
+            "\n  lead pos (NED) : [%.3f, %.3f, %.3f]"
+            "\n  actual  offset : [%.3f, %.3f, %.3f]"
+            "\n  desired offset : [%.3f, %.3f, %.3f]"
+            "\n  error          : [%.3f, %.3f, %.3f]"
+            "\n  error magnitude: %.3f m",
+            global_pos_3d.x(),      global_pos_3d.y(),      global_pos_3d.z(),
+            lead_global_pos_3d.x(), lead_global_pos_3d.y(), lead_global_pos_3d.z(),
+            actual_offset.x(),      actual_offset.y(),      actual_offset.z(),
+            desired_offset.x(),     desired_offset.y(),     desired_offset.z(),
+            offset_error.x(),       offset_error.y(),       offset_error.z(),
+            offset_error.norm());
+        
+            float z_error = target_pos_3d[2] - global_pos_3d[2];
         if (std::abs(z_error) < z_tolerance)
         {
             z_sync_phase = false;
@@ -221,12 +353,31 @@ void DistanceStepDrone2::trajectory_logic(){
     }
     
     if(!z_sync_phase){
+    Eigen::Vector3f actual_offset  = global_pos_3d-lead_global_pos_3d;
+    Eigen::Vector3f desired_offset = global_des_3d-lead_global_des_3d;
+    Eigen::Vector3f offset_error   = actual_offset-desired_offset;
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+        "\n--- CONVERGENCE CHECK (GPS/NED) ---"
+        "\n  own  pos (NED) : [%.3f, %.3f, %.3f]"
+        "\n  lead pos (NED) : [%.3f, %.3f, %.3f]"
+        "\n  actual  offset : [%.3f, %.3f, %.3f]"
+        "\n  desired offset : [%.3f, %.3f, %.3f]"
+        "\n  error          : [%.3f, %.3f, %.3f]"
+        "\n  error magnitude: %.3f m",
+        global_pos_3d.x(),      global_pos_3d.y(),      global_pos_3d.z(),
+        lead_global_pos_3d.x(), lead_global_pos_3d.y(), lead_global_pos_3d.z(),
+        actual_offset.x(),      actual_offset.y(),      actual_offset.z(),
+        desired_offset.x(),     desired_offset.y(),     desired_offset.z(),
+        offset_error.x(),       offset_error.y(),       offset_error.z(),
+        offset_error.norm());
+
     px4_msgs::msg::TrajectorySetpoint traj{};
         traj.timestamp = this->get_clock()->now().nanoseconds() / 1000; 
         traj.position = {
-            target_pos_3d[0],
-            target_pos_3d[1],
-            target_pos_3d[2]};
+            px4_target[0],
+            px4_target[1],
+            px4_target[2]};
         traj.yaw = current_yaw;
         trajectory_setpoint_pub_->publish(traj);    
     }
@@ -243,21 +394,10 @@ void DistanceStepDrone2::odom_own_callback(const px4_msgs::msg::VehicleOdometry:
         2.0f * (qw * qz + qx * qy),
         1.0f - 2.0f * (qy * qy + qz * qz)
     );
-    global_pos_3d << own_odom_msg->position[0], own_odom_msg->position[1], own_odom_msg->position[2];
-    global_pos_2d << own_odom_msg->position[0], own_odom_msg->position[1];
 
+    px4_setpoint_origin << own_odom_msg->position[0], own_odom_msg->position[1], own_odom_msg->position[2];
     odom_received_ = true;
 }
-
-void DistanceStepDrone2::odom_lead_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr lead_odom_msg)
-    {
-    lead_global_pos_3d << lead_odom_msg->position[0], lead_odom_msg->position[1], lead_odom_msg->position[2];
-    lead_global_pos_2d << lead_odom_msg->position[0], lead_odom_msg->position[1];
-    
-    // RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-    //     "[ODOM2] Drone 2 position: [%.2f, %.2f, %.2f], yaw: %.2f", 
-    //     dbc_.x_lead, dbc_.y_lead, dbc_.z_lead, current_yaw_);
-    }
 
 int main(int argc, char* argv[])
 {
