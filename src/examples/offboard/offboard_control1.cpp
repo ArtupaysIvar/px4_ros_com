@@ -9,6 +9,7 @@
 #include <vector>
 #include <Eigen/Dense>
 #include <Eigen/Geometry> 
+const float DRONE3_ALT_OFFSET = 3.0f;
 
 using namespace std::chrono_literals;
 
@@ -299,7 +300,7 @@ void Drone1Control::trajectory_logic(){
     if (current_wp_idx_ == 1){
         // const auto &wp = body_3dpos_setpoint[current_wp_idx_];
         // harusnya ga hard-coded
-        float target_drone3_z = init_fol_alt + 5.0f;
+        float target_drone3_z = init_fol_alt + DRONE3_ALT_OFFSET;
         
         bool drone3_ready =
             fol_alt_check &&
