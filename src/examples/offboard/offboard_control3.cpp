@@ -191,7 +191,8 @@
     }
 
         void DistanceStepDrone3::relative_setpoint(){
-        
+        offboard_control_mode();
+
         if (setpoint_counter_ < 10) {
             if (!odom_received_) {
             RCLCPP_WARN_THROTTLE(
@@ -262,6 +263,7 @@
     void DistanceStepDrone3::offboard_control_mode() {
         // PUBLISHER_COUNT (offboard control)
         px4_msgs::msg::OffboardControlMode offboard_msg{};
+        offboard_msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
         offboard_msg.position = true;
         offboard_msg.velocity = false;
         offboard_msg.acceleration = false;

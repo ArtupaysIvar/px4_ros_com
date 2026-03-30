@@ -122,7 +122,7 @@ DistanceStepDrone2::DistanceStepDrone2() : Node("distance_step_drone2")
         // Timer to send setpoints periodically
         timer_ = create_wall_timer(100ms, std::bind(&DistanceStepDrone2::relative_setpoint, this));
         
-        global_des_3d << -2.0f, -2.0f, 0.0f;
+        global_des_3d << - 2.0f, - 3.464f, 0.0f;
         lead_global_des_3d << 0.0f, 0.0f, 0.0f;
     }
 
@@ -194,7 +194,8 @@ void DistanceStepDrone2::gps_lead_callback(const px4_msgs::msg::VehicleGlobalPos
 }
 
     void DistanceStepDrone2::relative_setpoint(){
-    
+    offboard_control_mode();
+
     if (setpoint_counter_ < 10) {
         if (!odom_received_) {
         RCLCPP_WARN_THROTTLE(
@@ -210,7 +211,6 @@ void DistanceStepDrone2::gps_lead_callback(const px4_msgs::msg::VehicleGlobalPos
             return;
         }
 
-    offboard_control_mode();
     px4_msgs::msg::TrajectorySetpoint traj{};
     traj.timestamp = this->get_clock()->now().nanoseconds() / 1000; 
     traj.position = {
@@ -265,6 +265,7 @@ void DistanceStepDrone2::gps_lead_callback(const px4_msgs::msg::VehicleGlobalPos
 void DistanceStepDrone2::offboard_control_mode() {
     // PUBLISHER_COUNT (offboard control)
     px4_msgs::msg::OffboardControlMode offboard_msg{};
+    offboard_msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     offboard_msg.position = true;
     offboard_msg.velocity = false;
     offboard_msg.acceleration = false;

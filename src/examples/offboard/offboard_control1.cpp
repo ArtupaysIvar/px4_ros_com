@@ -145,11 +145,16 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
     body_3dpos_setpoint.reserve(20);
     // kalo z = 0 berarti dia simply tidak climb (bukan berarti landing) 
     body_3dpos_setpoint.emplace_back(0.0f, 0.0f, -5.0f);
-    // body_3dpos_setpoint.emplace_back(2.0f, 0.0f, 0.0f);
-    // body_3dpos_setpoint.emplace_back(-3.0f, 0.0f, 0.0f);
-    // body_3dpos_setpoint.emplace_back(1.0f, 0.0f, 0.0f);
-    // body_3dpos_setpoint.emplace_back(5.0f, 0.0f, 0.0f);
-    // body_3dpos_setpoint.emplace_back(0.0f, 3.0f, 0.0f);
+    // body_3dpos_setpoint.emplace_back(0.0f, 0.0f, 0.0f);
+    // body_3dpos_setpoint.emplace_back(20.0f, 0.0f, 0.0f);
+    // body_3dpos_setpoint.emplace_back(0.0f, 5.0f, 0.0f);
+    // body_3dpos_setpoint.emplace_back(-20.0f, 0.0f, 0.0f);
+    // body_3dpos_setpoint.emplace_back(0.0f, 5.0f, 0.0f);
+    // body_3dpos_setpoint.emplace_back(20.0f, 0.0f, 0.0f);
+    // body_3dpos_setpoint.emplace_back(0.0f, 5.0f, 0.0f);
+    // body_3dpos_setpoint.emplace_back(-20.0f, 0.0f, 0.0f);
+    // body_3dpos_setpoint.emplace_back(0.0f, 5.0f, 0.0f);
+    // body_3dpos_setpoint.emplace_back(20.0f, 0.0f, 0.0f);
     // body_3dpos_setpoint.emplace_back(0.0f, 0.0f, 5.0f);
 }
 
@@ -185,6 +190,7 @@ void Drone1Control::set_offboard_command() {
 void Drone1Control::offboard_control_mode() {
     // PUBLISHER_COUNT (offboard control)
     px4_msgs::msg::OffboardControlMode offboard_msg{};
+    offboard_msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     offboard_msg.position = true;
     // set true apa ya?
     offboard_msg.velocity = false;
@@ -250,7 +256,6 @@ void Drone1Control::odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPt
     global_position_2d << odom_msg->position[0], odom_msg->position[1];
 
     odom_received_ = true;
-
 }
 
 void Drone1Control::trajectory_logic(){
@@ -271,7 +276,6 @@ void Drone1Control::trajectory_logic(){
         // init_global_position_3d << global_position_3d[0], global_position_3d[1], global_position_3d[2];
         init_global_position_3d = global_position_3d;
         initialized_pos = true;
-        
         const auto &wp = body_3dpos_setpoint[current_wp_idx_];
          RCLCPP_INFO(this->get_logger(),
             "GANTI INIT_POS | WP %zu | body_wp = [%.2f, %.2f, %.2f] "
@@ -281,6 +285,7 @@ void Drone1Control::trajectory_logic(){
             init_global_position_3d.x(),
             init_global_position_3d.y(),
             init_global_position_3d.z(),
+
             global_position_3d.x(),
             global_position_3d.y(),
             global_position_3d.z());
@@ -385,6 +390,7 @@ Eigen::Vector2f Drone1Control::step_logic( // this one is to control velocity
 
 // function buat starting
 void Drone1Control::relative_setpoint(){
+    offboard_control_mode();
     if (setpoint_counter_ < 10) {
         if (!odom_received_) {
         RCLCPP_WARN_THROTTLE(
