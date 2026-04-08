@@ -100,7 +100,11 @@ add_executable(3d_vis src/examples/offboard/3d_vis.cpp)
 ament_target_dependencies(3d_vis rclcpp px4_msgs geometry_msgs tf2 nav_msgs)
 install(TARGETS 3d_vis DESTINATION lib/${PROJECT_NAME})
 
-
+# examples/offboard/traj_error
+add_executable(traj_error src/examples/offboard/traj_error.cpp)
+ament_target_dependencies(traj_error rclcpp px4_msgs std_msgs Eigen3 sensor_msgs)
+target_link_libraries(traj_error Eigen3::Eigen)
+install(TARGETS traj_error DESTINATION lib/${PROJECT_NAME})
 ############
 # Install ##
 ############

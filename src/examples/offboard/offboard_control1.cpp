@@ -145,7 +145,6 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
     body_3dpos_setpoint.reserve(20);
     // kalo z = 0 berarti dia simply tidak climb (bukan berarti landing) 
     body_3dpos_setpoint.emplace_back(0.0f, 0.0f, -5.0f);
-    // body_3dpos_setpoint.emplace_back(0.0f, 0.0f, 0.0f);
     // body_3dpos_setpoint.emplace_back(20.0f, 0.0f, 0.0f);
     // body_3dpos_setpoint.emplace_back(0.0f, 5.0f, 0.0f);
     // body_3dpos_setpoint.emplace_back(-20.0f, 0.0f, 0.0f);
@@ -156,7 +155,17 @@ Drone1Control::Drone1Control(): Node("drone1_control_node")
     // body_3dpos_setpoint.emplace_back(0.0f, 5.0f, 0.0f);
     // body_3dpos_setpoint.emplace_back(20.0f, 0.0f, 0.0f);
     // body_3dpos_setpoint.emplace_back(0.0f, 0.0f, 5.0f);
-}
+
+    body_3dpos_setpoint.emplace_back(0.0f, 20.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(5.0f, 0.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(0.0f, -20.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(5.0f, 0.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(0.0f, 20.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(5.0f, 0.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(0.0f, -20.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(5.0f, 0.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(0.0f, 20.0f, 0.0f);
+    body_3dpos_setpoint.emplace_back(0.0f, 0.0f, 5.0f);}
 
 void Drone1Control::arm() {
     // PUBLISHER_COUNT (vehicle command: arm)
@@ -297,7 +306,8 @@ void Drone1Control::trajectory_logic(){
     const auto &wp = body_3dpos_setpoint[current_wp_idx_];
     body_2dpos_setpoint << wp.x(), wp.y();
 
-    target_pos = init_global_position_2d + (yaw_rotational_matrix * body_2dpos_setpoint);
+    target_pos = init_global_position_2d + body_2dpos_setpoint;
+    // target_pos = init_global_position_2d + (yaw_rotational_matrix * body_2dpos_setpoint);
     
     target_z = init_global_position_3d[2] + wp.z();
 
